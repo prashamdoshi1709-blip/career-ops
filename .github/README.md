@@ -23,6 +23,21 @@ Changes made for my own job search, on top of upstream release 1.38.0:
 - **Dashboard additions**: an Explore page that runs several sources with per-source status, a portal-health view, scheduled scans with next-run times, per-job instructions for documents, and quality checks on generated CVs and letters (keyword coverage, unsupported claims, copied phrases)
 - Tests for the above in `tests/` and `web/tests/`
 
+## Finance-Focused Customisation
+
+This fork focuses on improving job discovery for the Australian finance recruitment market, particularly investment banking, M&A, corporate finance, equity research and investment management.
+
+## Development Roadmap
+
+- Expand coverage of specialist finance recruiters and employer career websites.
+- Automate job alert imports through Gmail.
+- Improve duplicate detection and job availability verification.
+- Integrate free-tier AI models for routine analysis.
+- Strengthen ATS matching and factual verification.
+- Improve dashboard performance, automation controls and system reliability.
+
+The development objective is to maintain an accessible, privacy-conscious and cost-efficient job-search platform.
+
 ## Not included
 
 This repository contains code only. My CV, profile, tracker, reports, generated documents, contacts, scan history and settings are kept out by the project's `.gitignore` and are not here. The personal CV and cover-letter generator that some dashboard routes call (`data/cv-original/`) contains my CV data, so it is not published; those routes do nothing without it.
