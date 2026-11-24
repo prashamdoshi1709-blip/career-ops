@@ -152,7 +152,7 @@ const ACTIONS: Record<string, ActionDef> = {
       const dir = Number(raw.dir);
       if (dir === 1 || dir === -1) sp.set("dir", String(dir));
       const qs = sp.toString();
-      ctx.replace(`/pipeline${qs ? `?${qs}` : ""}`);
+      ctx.replace(`/opportunities${qs ? `?${qs}` : ""}`);
       return { status: "done" };
     },
   },
@@ -169,7 +169,7 @@ const ACTIONS: Record<string, ActionDef> = {
         subtitle: isStr(raw.subtitle) ? String(raw.subtitle) : undefined,
         kind: "evaluate",
         input: url,
-        page: "/pipeline",
+        page: "/opportunities",
       });
       return { status: "done", jobIds: id ? [id] : [] };
     },
@@ -214,7 +214,7 @@ const ACTIONS: Record<string, ActionDef> = {
               subtitle: j.role,
               kind: "evaluate",
               input: j.url,
-              page: "/pipeline",
+              page: "/opportunities",
               batchId,
             }),
           )
@@ -255,20 +255,23 @@ const ACTIONS: Record<string, ActionDef> = {
         title: isStr(raw.title) ? String(raw.title) : "Research",
         kind: "research",
         input: target,
-        page: "/pipeline",
+        page: "/opportunities",
       });
       return { status: "done", jobIds: id ? [id] : [] };
     },
   },
 
+  // Local customisation (2026-11-10): the generic-template "pdf" worker made CVs
+  // in a different design without the quality gates. CVs and letters now come
+  // only from the shared original-format generator on the job page, so this
+  // action takes the user there instead of starting a second generator.
   generatePdf: {
-    sideEffect: "spend",
+    sideEffect: "none",
     run: (raw, ctx) => {
       const n = String(raw.n ?? "").trim();
-      if (!n) return { status: "ignored", note: "need an application #" };
-      const app = applicationByNumber(ctx.applications, n);
-      const id = ctx.startJob({ title: `CV PDF · ${app?.company ?? `#${n}`}`, subtitle: "tailored CV", kind: "pdf", input: n, page: `/pipeline/${n}` });
-      return { status: "done", jobIds: id ? [id] : [] };
+      if (!/^\d+$/.test(n)) return { status: "ignored", note: "need an application #" };
+      ctx.push(`/opportunities/${n}`);
+      return { status: "done", note: "Opened the job page: use Generate CV + cover letter there (original format, with the quality checks)." };
     },
   },
 

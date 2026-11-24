@@ -93,6 +93,7 @@ import { loadProviders, resolveProvider } from './providers/_registry.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { getCareerOpsRoot } from './path-resolver.mjs';
+import { circuitKeyFor, gate, readRateLimitState } from './rate-limit-state.mjs';
 
 // getCareerOpsRoot() (not a bare 'portals.yml'): scan.mjs, scan-ats-full.mjs
 // and audit-portals.mjs all resolve their default portals.yml against the
@@ -461,7 +462,10 @@ export function unminedHints(cfg) {
  * Classify a fetch/probe failure for scan summaries and slug diagnostics.
  *
  * @param {Error|{status?: number, name?: string, message?: string}|null|undefined} err
- * @returns {'slug_gone'|'auth'|'network'|'server'|'unknown'}
+ * 429 is 'rate_limited' (2026-11-22): temporary, never a broken board, and
+ * the scanner waits out a backoff window rather than retrying or rewriting it.
+ *
+ * @returns {'slug_gone'|'auth'|'network'|'server'|'rate_limited'|'unknown'}
  */
 export function classifyFetchError(err) {
   if (!err) return 'unknown';
@@ -471,6 +475,7 @@ export function classifyFetchError(err) {
     return 'network';
   }
   const status = err.status;
+  if (status === 429 || /HTTP 429|Too Many Requests/i.test(msg)) return 'rate_limited';
   if (status === 404 || status === 410) return 'slug_gone';
   if (status === 401 || status === 403) return 'auth';
   if (typeof status === 'number' && status >= 500) return 'server';
@@ -847,7 +852,7 @@ export async function probeProvider(entry, provider, baseCtx) {
  */
 export async function verifyCompanies(
   companies,
-  { fetchJson = probeFetchJson, fetchText = probeFetchText, providers = null, httpCtx = null, concurrency = 6 } = {},
+  { fetchJson = probeFetchJson, fetchText = probeFetchText, providers = null, httpCtx = null, concurrency = 6, rateLimitState = null } = {},
 ) {
   const list = (Array.isArray(companies) ? companies : []).filter(
     (c) => c && typeof c === 'object' && c.enabled !== false,
@@ -857,7 +862,7 @@ export async function verifyCompanies(
   const worker = async () => {
     while (next < list.length) {
       const i = next++;
-      rows[i] = await verifyOne(list[i], { fetchJson, fetchText, providers, httpCtx });
+      rows[i] = await verifyOne(list[i], { fetchJson, fetchText, providers, httpCtx, rateLimitState });
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, list.length)) }, worker));
@@ -871,8 +876,18 @@ export async function verifyCompanies(
  * @param {{fetchJson: Function, fetchText: Function, providers: Map|null, httpCtx: object|null}} deps
  * @returns {Promise<object>}
  */
-async function verifyOne(company, { fetchJson, fetchText, providers, httpCtx }) {
+async function verifyOne(company, { fetchJson, fetchText, providers, httpCtx, rateLimitState = null }) {
   const name = typeof company.name === 'string' ? company.name : '(unnamed)';
+  // 2026-11-23: a health check sends no request to a Workday cluster whose
+  // shared circuit (rate-limit-state.mjs) is paused or awaiting the scanners'
+  // test request; it reports the board as temporarily rate-limited instead.
+  // Probing it would only extend the penalty, and the scanners retry it.
+  const circuitKey = rateLimitState ? circuitKeyFor(company.careers_url || company.api) : null;
+  const circuit = circuitKey ? rateLimitState.circuits?.[circuitKey] : null;
+  if (circuit && circuit.state && circuit.state !== 'closed') {
+    const g = gate(circuit);
+    return { name, status: 'missing', errorKind: 'rate_limited', reason: `${circuitKey.replace('workday:', 'Workday ')} paused by rate limits${g.until ? ` until ${String(g.until).slice(0, 16)}Z` : ''}; no request sent, the scanners retry it` };
+  }
   const match =
     parseAtsSlug(company.api) || parseAtsSlug(company.careers_url);
   // An Ashby entry that opts into the embed source (`ashby: { embed: true }`)
@@ -919,7 +934,7 @@ async function verifyOne(company, { fetchJson, fetchText, providers, httpCtx }) 
  */
 export async function verifyPortalsFile(
   filePath,
-  { fetchJson = probeFetchJson, providers = null, httpCtx = null } = {},
+  { fetchJson = probeFetchJson, providers = null, httpCtx = null, rateLimitState = null } = {},
 ) {
   if (!existsSync(filePath)) return { found: false, results: [] };
   const config = loadYaml(readFileSync(filePath, 'utf-8'));
@@ -930,7 +945,7 @@ export async function verifyPortalsFile(
     ...(Array.isArray(config?.tracked_companies) ? config.tracked_companies : []),
     ...(Array.isArray(config?.job_boards) ? config.job_boards : []),
   ];
-  const results = await verifyCompanies(entries, { fetchJson, providers, httpCtx });
+  const results = await verifyCompanies(entries, { fetchJson, providers, httpCtx, rateLimitState });
   return { found: true, results };
 }
 
@@ -941,6 +956,7 @@ const ERROR_KIND_LABEL = {
   auth: 'auth blocked',
   network: 'network error',
   server: 'server error',
+  rate_limited: 'rate-limited, temporary',
   unknown: 'unresolved',
 };
 
@@ -1192,7 +1208,8 @@ async function main() {
   const { mergeProviderPlugins } = await import('./plugins/_engine.mjs');
   await mergeProviderPlugins(providers, { root: dirname(PROVIDERS_DIR), dataRoot: DATA_ROOT });
   const httpCtx = makeHttpCtx();
-  const { found, results } = await verifyPortalsFile(filePath, { fetchJson, providers, httpCtx });
+  const rateLimitState = readRateLimitState(join(DATA_ROOT, 'data', 'rate-limit-state.json'));
+  const { found, results } = await verifyPortalsFile(filePath, { fetchJson, providers, httpCtx, rateLimitState });
   if (!found) {
     // Graceful no-op: fresh setups (and CI, which ships no portals.yml) have
     // nothing to verify. Not an error.

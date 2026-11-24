@@ -5,6 +5,7 @@ import { getNormalizeTextKey } from "@/lib/core/text-key";
 import { evaluatedKeys, isEvaluated } from "@/lib/whats-new-suppression.mjs";
 import type { DiscoveredOffer } from "@/lib/explore";
 import { collectWhatsNew, resolveOfferLimit } from "@/lib/whats-new.mjs";
+import { irrelevantReason } from "@/lib/role-relevance.mjs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -61,6 +62,9 @@ export async function GET(req: Request) {
     if (!url || !/^https?:\/\//i.test(url)) return null;
     if (status && /skipped|expired/i.test(status)) return null;
     if (isEvaluated(evaluated, normalizeTextKey, company, title)) return null;
+    // Local customisation (2026-11-10): hide sales / BD / marketing / general
+    // graduate schemes / senior leadership by function (see role-relevance.mjs).
+    if (irrelevantReason(title, company)) return null;
     return {
       url,
       company: (company || "").trim(),

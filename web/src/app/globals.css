@@ -6,14 +6,16 @@
    (mode-invariant), zinc neutrals, light + dark (Fumadocs neutral values).
    ────────────────────────────────────────────────────────────────────────── */
 @theme {
-  --color-brand: hsl(26 73% 51%);
-  --color-brand-200: hsl(33 100% 60%); /* hover / lighter */
+  /* Local customisation (2026-11-10): navy accents on a pure white UI (light mode).
+     Previous warm-orange values are in data/backups/2026-11-10/globals.css. */
+  --color-brand: #1f3a6e;
+  --color-brand-200: #2c4f8f; /* hover / lighter */
   /* Near-black on the brand orange: 5.2:1 on brand, 8.3:1 on brand-200 hover
      (white was 3.14:1, an AA fail in BOTH themes since the button is the same).
      The brand orange itself is untouched — only what sits on top of it. */
-  --color-brand-foreground: hsl(24 30% 12%);
-  --color-brand-soft: hsl(26 73% 51% / 0.12);
-  --color-brand-secondary: #fc7744;
+  --color-brand-foreground: #ffffff;
+  --color-brand-soft: rgb(31 58 110 / 0.08);
+  --color-brand-secondary: #3b5b94;
 
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-serif: var(--font-instrument-serif), ui-serif, Georgia, serif;
@@ -39,17 +41,17 @@
 }
 
 :root {
-  --bg: #f7f6f3; /* warm off-white (docs stone tone) */
+  --bg: #ffffff; /* pure white (2026-11-10) */
   --surface: #ffffff;
-  --surface-hover: #efeeea;
-  --border: hsl(40 9% 86%);
-  --fg: hsl(30 10% 11%); /* warm near-black, high legibility */
-  --muted: hsl(35 9% 34%); /* darker than before for readable body text */
-  --faint: hsl(35 7% 42%); /* AA: ~4.6:1 on #fff (was 50% ≈ 3.9:1, failed small text) */
-  --landing: #59592a; /* olive editorial headline */
-  --brand-text: hsl(26 80% 36%); /* darkened brand for small text: 5.5 white / 5.1 cream / 4.7 surface-hover */
-  --dot: 40 8% 42% / 0.09;
-  --pre-bg: #f2f1ed;
+  --surface-hover: #f3f5f8;
+  --border: #e2e5ea; /* light grey */
+  --fg: #111827; /* dark readable text */
+  --muted: #374151;
+  --faint: #5b6472; /* AA on white */
+  --landing: #1f3a6e; /* navy headline */
+  --brand-text: #1f3a6e; /* navy small text, 11:1 on white */
+  --dot: 220 10% 50% / 0; /* no dot grid: pure white */
+  --pre-bg: #f5f7fa;
   color-scheme: light;
 }
 

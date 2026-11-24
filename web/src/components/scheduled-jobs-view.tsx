@@ -198,7 +198,11 @@ export function ScheduledJobsView() {
       <div className="grid gap-3.5 sm:grid-cols-4">
         <StatCard label="Active Scans" value={activeJobs.length} subtitle={`${jobsList.length} total jobs`} icon={<Zap className="size-4 text-emerald-500" />} />
         <StatCard label="Executed Runs" value={totalRuns} subtitle={`${successRuns} successful`} icon={<Layers className="size-4 text-brand" />} />
-        <StatCard label="Roles Discovered" value={totalRolesFound} subtitle="Pushed to pipeline" icon={<Sparkles className="size-4 text-amber-500" />} />
+        {/* 2026-11-23: this is the sum each stored scheduled run reported, since
+            the first stored run. Explore's "added in the last 30 days" counts
+            every scan (manual ones too) from scan history, so the two differ;
+            runs before 11 Nov reported matches with an older count. */}
+        <StatCard label="New roles from scheduled runs" value={totalRolesFound} subtitle={`As reported by ${store.runs.length} stored runs${store.runs.length ? ` since ${new Date(store.runs.reduce((m, r) => (r.at < m ? r.at : m), store.runs[0].at)).toLocaleDateString("en-AU", { day: "numeric", month: "short" })}` : ""}; manual scans not included`} icon={<Sparkles className="size-4 text-amber-500" />} />
         <StatCard label="Success Rate" value={successRate} subtitle={`${failedRuns} failed runs`} icon={<CheckCircle2 className="size-4 text-emerald-500" />} />
       </div>
 

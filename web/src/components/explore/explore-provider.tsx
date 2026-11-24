@@ -62,6 +62,10 @@ type ExploreCtx = {
   companiesAvailable: number;
   capHit: boolean;
   droppedNoDate: number;
+  /** Directory rotation coverage per source (2026-11-22); null before a rotated scan. */
+  coverage: Record<string, { available: number; coveredEver: number; covered30d: number; notYetScanned: number }> | null;
+  /** Per source of the last directory scan (2026-11-23): completed, partial, blocked or unavailable. */
+  sourceStates: { source: string; state: string; note: string }[];
   status: string;
   employerOutcome: EmployerScanOutcome | null;
   partial: boolean;
@@ -144,8 +148,10 @@ export function ExploreProvider({ children }: { children: React.ReactNode }) {
   const [companiesAvailable, setCompaniesAvailable] = useState(0);
   const [capHit, setCapHit] = useState(false);
   const [droppedNoDate, setDroppedNoDate] = useState(0);
+  const [coverage, setCoverage] = useState<ExploreCtx["coverage"]>(null);
   const [status, setStatus] = useState("");
   const [partial, setPartial] = useState(false);
+  const [sourceStates, setSourceStates] = useState<{ source: string; state: string; note: string }[]>([]);
   const [error, setError] = useState("");
   const [scannerMissing, setScannerMissing] = useState(false);
   const [added, setAdded] = useState<Set<string>>(new Set());
@@ -191,6 +197,7 @@ export function ExploreProvider({ children }: { children: React.ReactNode }) {
     setCapHit(false);
     setDroppedNoDate(0);
     setPartial(false);
+    setSourceStates([]);
     setError("");
     setScannerMissing(false);
     setStatus("Casting the net across the ATS network…");
@@ -245,6 +252,8 @@ export function ExploreProvider({ children }: { children: React.ReactNode }) {
           companiesScannedAcc = ev.companiesScanned;
           setCompaniesScanned(ev.companiesScanned);
           if (typeof ev.companiesAvailable === "number") setCompaniesAvailable(ev.companiesAvailable);
+          if (ev.coverage) setCoverage(ev.coverage);
+          if (ev.sourceStates) setSourceStates(ev.sourceStates);
           if (ev.capHit) {
             capHitAcc = true;
             setCapHit(true);
@@ -365,6 +374,7 @@ export function ExploreProvider({ children }: { children: React.ReactNode }) {
     setCapHit(false);
     setDroppedNoDate(0);
     setPartial(false);
+    setSourceStates([]);
     setSources({});
     setError("");
     try {
@@ -451,6 +461,7 @@ export function ExploreProvider({ children }: { children: React.ReactNode }) {
     setCompaniesScanned(0);
     setStatus("");
     setPartial(false);
+    setSourceStates([]);
     setError("");
     setScannerMissing(false);
     setAiTrace([]);
@@ -660,11 +671,11 @@ export function ExploreProvider({ children }: { children: React.ReactNode }) {
     () => ({
       filters, setFilters, initFilters, phase,
       running: phase === "casting" || phase === "scanning" || phase === "revealing" || phase === "hunting",
-      offers, sources, matchCount, companiesScanned, companiesAvailable, capHit, droppedNoDate, status, employerOutcome, partial, error, scannerMissing, added, adding,
+      offers, sources, matchCount, companiesScanned, companiesAvailable, capHit, droppedNoDate, coverage, sourceStates, status, employerOutcome, partial, error, scannerMissing, added, adding,
       discover, loadFresh, addToPipeline, applyPatch, reset,
       mode, setMode, aiIntent, setAiIntent, discoverAI, aiTrace, aiCost,
     }),
-    [filters, setFilters, initFilters, phase, offers, sources, matchCount, companiesScanned, companiesAvailable, capHit, droppedNoDate, status, employerOutcome, partial, error, scannerMissing, added, adding, discover, loadFresh, addToPipeline, applyPatch, reset, mode, setMode, aiIntent, discoverAI, aiTrace, aiCost],
+    [filters, setFilters, initFilters, phase, offers, sources, matchCount, companiesScanned, companiesAvailable, capHit, droppedNoDate, coverage, sourceStates, status, employerOutcome, partial, error, scannerMissing, added, adding, discover, loadFresh, addToPipeline, applyPatch, reset, mode, setMode, aiIntent, discoverAI, aiTrace, aiCost],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

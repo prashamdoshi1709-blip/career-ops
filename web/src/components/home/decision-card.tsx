@@ -6,6 +6,7 @@ import Link from "next/link";
 import { Check, X, FileText, Loader2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { CompanyLogo } from "@/components/company-logo";
+import { DocLinks } from "@/components/doc-links";
 import { scoreNum, scoreTone } from "@/lib/format";
 import { companyPresentation } from "@/lib/company-presentation.mjs";
 import { statusWriteError } from "@/lib/home/status-result.mjs";
@@ -34,6 +35,12 @@ export function DecisionCard({ app, reason }: { app: Application; reason?: CardR
 
   const setStatus = async (status: "Applied" | "Discarded") => {
     if (submitting.current) return;
+    // Local customisation (2026-11-09): this one-click button sits next to Review,
+    // so confirm before recording a status the candidate may not mean.
+    const question = status === "Applied"
+      ? `Mark ${company.label}, ${app.role} as Applied?\n\nOnly do this if you have already submitted the application yourself.`
+      : `Skip ${company.label}, ${app.role}? It will be marked Discarded.`;
+    if (!window.confirm(question)) return;
     submitting.current = true;
     setBusy(status);
     setError(null);
@@ -90,7 +97,7 @@ export function DecisionCard({ app, reason }: { app: Application; reason?: CardR
         {/* Primary is the report (PDF + Apply live there). Marking Applied from
             Today skipped that path and wrote a status with no application. */}
         <Link
-          href={`/pipeline/${app.n}`}
+          href={`/opportunities/${app.n}`}
           className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md bg-brand-soft px-2.5 py-1.5 text-xs font-medium text-brand-text transition hover:bg-brand/15 max-sm:min-h-[44px]"
         >
           <FileText className="size-3.5" /> Review
@@ -114,6 +121,8 @@ export function DecisionCard({ app, reason }: { app: Application; reason?: CardR
           Applied
         </button>
       </div>
+      {/* 2026-11-11: this job's own CV and cover letter (or why they are not ready). */}
+      <DocLinks jobKey={`t${app.n}`} />
       {error && (
         <div role="alert" className="flex items-start gap-2 text-xs text-red-600 dark:text-red-400">
           <p className="min-w-0 flex-1">{error}</p>

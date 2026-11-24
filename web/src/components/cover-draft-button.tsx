@@ -48,7 +48,7 @@ export function CoverDraftButton({ n, company }: { n: string; company: string })
     const data = new FormData(e.currentTarget);
     const brief = Object.fromEntries(["why", "problem", "approach", "tone"].map((k) => [k, String(data.get(k) ?? "")]));
     setSavedBrief(brief);
-    startJob({ title: `Cover letter · ${company}`, subtitle: "draft for this role", kind: "cover", input: n, page: `/pipeline/${n}`, brief });
+    startJob({ title: `Cover letter · ${company}`, subtitle: "draft for this role", kind: "cover", input: n, page: `/opportunities/${n}`, brief });
     setOpen(false);
   };
 

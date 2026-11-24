@@ -314,7 +314,7 @@ export function FollowupsView() {
           <ul className="mt-3 divide-y divide-border rounded-2xl border border-border">
             {upcoming.map((entry) => (
               <li key={entry.num} className="flex flex-wrap items-baseline justify-between gap-2 px-4 py-3 text-sm">
-                <Link href={`/pipeline/${entry.num}`} className="font-medium text-foreground hover:text-brand">
+                <Link href={`/opportunities/${entry.num}`} className="font-medium text-foreground hover:text-brand">
                   {entry.company}
                   {entry.role ? <span className="font-normal text-muted"> · {entry.role}</span> : null}
                 </Link>
@@ -403,7 +403,7 @@ function FollowupRow({
         </td>
         <td className="px-2.5 py-3 font-medium">
           {e.reportPath ? (
-            <Link href={`/pipeline/${e.num}`} className="flex items-center gap-2.5 transition-colors group-hover:text-brand">
+            <Link href={`/opportunities/${e.num}`} className="flex items-center gap-2.5 transition-colors group-hover:text-brand">
               <CompanyLogo name={e.company} size={20} />
               {e.company}
             </Link>

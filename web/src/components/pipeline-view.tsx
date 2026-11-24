@@ -22,6 +22,44 @@ import { COMPARE_MAX } from "@/lib/pipeline-compare.mjs";
 import { postingHref, postingLabel } from "@/lib/posting-url.mjs";
 import { trackerCsv, trackerCsvFilename } from "@/lib/tracker-csv.mjs";
 
+// Local customisation (2026-11-09): extra per-row facts from reports and the PDF
+// index (see lib/pipeline-details.mjs). Optional so the view still renders without them.
+export type PipelineDetail = {
+  reportNum: string | null;
+  location: string;
+  posted: string;
+  deadline: string;
+  suitability: number | null;
+  cv: boolean;
+  cover: boolean;
+  stage: string;
+};
+
+const STAGE_TONE: Record<string, string> = {
+  "Under Review": "border-amber-500/40 bg-amber-500/10 text-amber-800 dark:text-amber-300",
+  "Ready to Apply": "border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-300",
+  Applied: "border-sky-500/40 bg-sky-500/10 text-sky-800 dark:text-sky-300",
+  Interview: "border-violet-500/40 bg-violet-500/10 text-violet-800 dark:text-violet-300",
+  Offer: "border-emerald-600/50 bg-emerald-600/15 text-emerald-900 dark:text-emerald-200",
+  Rejected: "border-rose-500/40 bg-rose-500/10 text-rose-800 dark:text-rose-300",
+  Closed: "border-border bg-surface text-faint",
+};
+
+// Header order: sortable tracker keys interleaved with the added plain columns.
+const COLUMNS: { key: string; label: string; sortable: boolean; className?: string }[] = [
+  { key: "tracker", label: "#", sortable: true },
+  { key: "company", label: "Company", sortable: true },
+  { key: "role", label: "Job title", sortable: true },
+  { key: "location", label: "Location", sortable: false },
+  { key: "score", label: "Score", sortable: true },
+  { key: "stage", label: "Stage", sortable: false },
+  { key: "status", label: "Status", sortable: true },
+  { key: "posted", label: "Posted", sortable: false, className: "hidden md:table-cell" },
+  { key: "deadline", label: "Deadline", sortable: false, className: "hidden md:table-cell" },
+  { key: "docs", label: "Documents", sortable: false },
+  { key: "date", label: "Evaluated", sortable: true, className: "hidden lg:table-cell" },
+];
+
 type Tab = (typeof PIPELINE_TABS)[number];
 
 const SORT_KEYS = ["tracker", "company", "role", "score", "status", "date"] as const;
@@ -31,10 +69,12 @@ export function PipelineView({
   applications,
   inbox,
   inboxCount,
+  details = {},
 }: {
   applications: Application[];
   inbox: InboxJob[] | null;
   inboxCount: number;
+  details?: Record<string, PipelineDetail>;
 }) {
   const params = useSearchParams();
   const router = useRouter();
@@ -276,7 +316,7 @@ export function PipelineView({
           </button>
           {selectedRows.length >= 2 && selectedRows.length <= COMPARE_MAX && (
             <Link
-              href={`/pipeline/compare?n=${selectedRows.map((r) => r.n).join(",")}`}
+              href={`/opportunities/compare?n=${selectedRows.map((r) => r.n).join(",")}`}
               className="rounded-md border border-border px-2.5 py-1 text-xs font-medium text-foreground hover:border-brand/40 hover:text-brand"
             >
               Compare
@@ -315,7 +355,7 @@ export function PipelineView({
            of being silently cut off. min-w keeps the columns readable rather
            than letting w-full crush them on a phone. */
         <div className="mt-4 overflow-x-auto rounded-2xl border border-border">
-          <table className="w-full min-w-[44rem] text-sm">
+          <table className="w-full min-w-[72rem] text-sm">
             <thead className="bg-surface/60 text-left text-xs uppercase tracking-wide text-faint">
               <tr>
                 <th className="w-8 px-3 py-2.5">
@@ -326,25 +366,27 @@ export function PipelineView({
                     onChange={() => setSelected(allSelected ? new Set() : new Set(filteredKeys))}
                   />
                 </th>
-                {SORT_KEYS.map((k) => (
-                  <th
-                    key={k}
-                    aria-sort={sort.key === k ? (sort.dir === 1 ? "ascending" : "descending") : "none"}
-                    className={cn(
-                      "whitespace-nowrap px-4 py-2.5 font-medium",
-                      k === "date" && "hidden lg:table-cell",
-                    )}
-                  >
-                    <button
-                      type="button"
-                      className="inline-flex cursor-pointer select-none items-center gap-1 uppercase tracking-wide hover:text-foreground"
-                      onClick={() => setParams({ sort: k, dir: sort.key === k ? sort.dir * -1 : -1 })}
+                {COLUMNS.map((c) => {
+                  const k = c.key as SortKey;
+                  return c.sortable ? (
+                    <th
+                      key={c.key}
+                      aria-sort={sort.key === k ? (sort.dir === 1 ? "ascending" : "descending") : "none"}
+                      className={cn("whitespace-nowrap px-4 py-2.5 font-medium", c.className)}
                     >
-                      {k}
-                      <ChevronsUpDown aria-hidden="true" className="size-3" />
-                    </button>
-                  </th>
-                ))}
+                      <button
+                        type="button"
+                        className="inline-flex cursor-pointer select-none items-center gap-1 uppercase tracking-wide hover:text-foreground"
+                        onClick={() => setParams({ sort: k, dir: sort.key === k ? sort.dir * -1 : -1 })}
+                      >
+                        {c.label}
+                        <ChevronsUpDown aria-hidden="true" className="size-3" />
+                      </button>
+                    </th>
+                  ) : (
+                    <th key={c.key} className={cn("whitespace-nowrap px-4 py-2.5 font-medium", c.className)}>{c.label}</th>
+                  );
+                })}
               </tr>
             </thead>
             {/* Keep editors mounted while query navigation is pending: sorting
@@ -353,8 +395,10 @@ export function PipelineView({
               {filtered.map((r) => {
                 const company = companyPresentation(r);
                 const key = applicationKey(r);
-                const detailHref = `/pipeline/${encodeURIComponent(r.n)}${detailQuery ? `?${detailQuery}` : ""}`;
+                const detailHref = `/opportunities/${encodeURIComponent(r.n)}${detailQuery ? `?${detailQuery}` : ""}`;
                 const posting = postingHref(r.url);
+                const d = details[r.n];
+                const docN = d?.reportNum ?? r.n;
                 return (
                   <tr key={key} data-application-key={key} className="group transition-colors hover:bg-surface/40">
                     <td className="w-8 px-3 py-3">
@@ -393,8 +437,15 @@ export function PipelineView({
                       )}
                     </div>
                   </td>
+                  <td className="px-4 py-3 text-muted">{d?.location || "—"}</td>
                   <td className="px-4 py-3">
                     <Badge tone={scoreTone(r.score)}>{r.score || "—"}</Badge>
+                    {d?.suitability != null && <div className="mt-1 text-[11px] tabular-nums text-faint">{d.suitability}/10</div>}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3">
+                    {d?.stage ? (
+                      <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-medium", STAGE_TONE[d.stage] ?? STAGE_TONE.Closed)}>{d.stage}</span>
+                    ) : "—"}
                   </td>
                   <td className="whitespace-nowrap px-4 py-3 text-muted">
                     <StatusSelect
@@ -416,6 +467,24 @@ export function PipelineView({
                         });
                       }}
                     />
+                  </td>
+                  <td className="hidden whitespace-nowrap px-4 py-3 text-muted tabular-nums md:table-cell">{d?.posted || "—"}</td>
+                  <td className="hidden whitespace-nowrap px-4 py-3 tabular-nums md:table-cell">
+                    {d?.deadline ? <span className="font-medium text-amber-700 dark:text-amber-300">{d.deadline}</span> : <span className="text-faint">—</span>}
+                  </td>
+                  <td className="whitespace-nowrap px-4 py-3 text-xs">
+                    <div className="flex items-center gap-2">
+                      {d?.cv ? (
+                        <a href={`/api/cv-pdf?n=${encodeURIComponent(docN)}&company=${encodeURIComponent(r.company)}`} target="_blank" rel="noreferrer" className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-800 hover:bg-emerald-500/20 dark:text-emerald-300">CV</a>
+                      ) : (
+                        <span className="rounded-full border border-dashed border-border px-2 py-0.5 text-faint" title="No tailored CV yet">CV</span>
+                      )}
+                      {d?.cover ? (
+                        <a href={`/api/cv-pdf?n=${encodeURIComponent(docN)}&kind=cover`} target="_blank" rel="noreferrer" className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-800 hover:bg-emerald-500/20 dark:text-emerald-300">Cover</a>
+                      ) : (
+                        <span className="rounded-full border border-dashed border-border px-2 py-0.5 text-faint" title="No cover letter yet">Cover</span>
+                      )}
+                    </div>
                   </td>
                   <td className="hidden whitespace-nowrap px-4 py-3 text-faint tabular-nums lg:table-cell">{r.date}</td>
                   </tr>
@@ -457,7 +526,7 @@ function InboxEmpty({ tracked }: { tracked: number }) {
         {tracked > 0 && (
           <p className="mx-auto mt-2 max-w-sm text-sm text-muted">
             New postings land here. Your{" "}
-            <Link href="/pipeline?tab=ALL" className="font-medium text-brand-text underline-offset-2 hover:underline">
+            <Link href="/opportunities?tab=ALL" className="font-medium text-brand-text underline-offset-2 hover:underline">
               {tracked} tracked role{tracked === 1 ? "" : "s"}
             </Link>{" "}
             {tracked === 1 ? "is" : "are"} under All.

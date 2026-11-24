@@ -1,3 +1,7 @@
+import { OriginalDocsButton, type DocsPanelData } from "@/components/original-docs-button";
+import { StatePill, type DocInfo } from "@/components/doc-links";
+import { fileHref } from "@/lib/doc-href.mjs";
+import { ManualJobDialog, type ManualJobValues } from "@/components/manual-job-dialog";
 import Link from "next/link";
 import { ArrowLeft, FileText, ExternalLink, ChevronDown } from "lucide-react";
 import type { Application } from "@/lib/career-ops";
@@ -29,6 +33,10 @@ import { KeywordCoverage } from "@/components/keyword-coverage";
 import { CompanyEvidence } from "@/components/company-evidence";
 import { companyPresentation } from "@/lib/company-presentation.mjs";
 import { PageFrame } from "@/components/page-frame";
+import { readCandidate, toRegExp } from "@/lib/candidate-profile.mjs";
+
+// "Lead with" hint from the git-ignored candidate profile (2026-11-19); hidden when not set.
+const LEAD = readCandidate().reportLeadWith as { when: [string, string]; then: string; otherwise: string } | null;
 
 // Progressive disclosure of the report. Current oferta.md writes letter F as
 // Interview Plan (STAR+R), not a verdict — never promote by letter (#3416).
@@ -52,9 +60,15 @@ export function ReportView({
   canDelete = false,
   pdfReadyFromIndex = false,
   coverReady = false,
-  backHref = "/pipeline",
+  backHref = "/opportunities",
   applyHref,
   reportNum = null,
+  facts,
+  manualJob = null,
+  docsPanel = null,
+  generator = "",
+  docState = null,
+  lastQuality = null,
 }: {
   id: string;
   app: Application | null;
@@ -71,6 +85,13 @@ export function ReportView({
   backHref?: string;
   applyHref?: string;
   reportNum?: number | null;
+  /** Local customisation (2026-11-09): location, dates, stage and document links (lib/pipeline-details.mjs). */
+  lastQuality?: unknown;
+  manualJob?: { values: Record<string, string>; outdated: boolean; jdUpdatedAt: string } | null;
+  docsPanel?: DocsPanelData | null;
+  generator?: string;
+  docState?: DocInfo | null;
+  facts?: { reportNum: string | null; location: string; posted: string; deadline: string; suitability: number | null; cv: boolean; cover: boolean; stage: string };
 }) {
   const meta = report ? parseReport(report) : null;
   const field = (label: string) => meta?.fields.find((f) => f.label === label)?.value;
@@ -83,7 +104,11 @@ export function ReportView({
   const recommended = line === "Recommended";
   const quietApply = applyCtaQuiet({ score, legitimacy: meta?.legitimacy });
   const applyUrl = httpUrl(url);
-  const pdfReady = (app?.pdf ?? "").includes("✅") || pdfReadyFromIndex;
+  // 2026-11-11: "ready" comes from the document status (files indexed AND the
+  // latest quality check passed AND the letter exists), not from the tracker's
+  // PDF column alone, which could say ✅ while the quality panel said "Not ready".
+  const pdfReady = docState ? docState.state === "ready" : (app?.pdf ?? "").includes("✅") || pdfReadyFromIndex;
+  const cvExists = docState ? Boolean(docState.cv) : pdfReady;
   const company = app ? companyPresentation(app) : null;
   const companyName = company?.label ?? app?.company ?? meta?.title ?? id;
 
@@ -93,7 +118,7 @@ export function ReportView({
         href={backHref}
         className="inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-brand"
       >
-        <ArrowLeft className="size-4" /> Pipeline
+        <ArrowLeft className="size-4" /> All Job Opportunities
       </Link>
 
       <header className="mt-5">
@@ -108,8 +133,17 @@ export function ReportView({
 
         <div className="mt-4 flex flex-wrap items-center gap-2.5">
           {app && <StatusSelect n={id} current={app.status} />}
-          <GeneratePdfButton n={id} company={app?.company ?? meta?.title ?? id} pdfReady={pdfReady} />
-          {app && report && <CoverDraftButton n={id} company={companyName} />}
+          {app && manualJob && (
+            <ManualJobDialog
+              mode="edit"
+              n={id}
+              initial={manualJob.values as Partial<ManualJobValues>}
+              hasDocs={Boolean(facts?.cv || facts?.cover)}
+              canRemove={app.status === "Evaluated" && !facts?.cv && !facts?.cover}
+            />
+          )}
+          <GeneratePdfButton n={id} company={app?.company ?? meta?.title ?? id} pdfReady={cvExists} href={docState?.cv ? fileHref(docState.cv) : null} />
+          {/* 2026-11-10: cover letters come from OriginalDocsButton (PDF in the original format). */}
           {applyHref && (
             <Link
               href={applyHref}
@@ -118,10 +152,10 @@ export function ReportView({
               Apply checklist
             </Link>
           )}
-          <MarkPdfReadyButton reportNum={reportNum} ready={pdfReady} />
-          {coverReady && (
+          {docState ? <StatePill info={docState} className="px-2.5 py-1 text-xs" /> : <MarkPdfReadyButton reportNum={reportNum} ready={pdfReady} />}
+          {(coverReady || Boolean(docState?.cover)) && (
             <a
-              href={`/api/cover-pdf?application=${encodeURIComponent(id)}`}
+              href={docState?.cover ? fileHref(docState.cover) : facts?.cover ? `/api/cv-pdf?n=${encodeURIComponent(facts.reportNum ?? id)}&kind=cover` : `/api/cover-pdf?application=${encodeURIComponent(id)}`}
               target="_blank"
               rel="noreferrer"
               className="inline-flex items-center justify-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-700 transition-colors hover:bg-emerald-500/15 dark:text-emerald-400 max-sm:min-h-[44px]"
@@ -130,6 +164,46 @@ export function ReportView({
             </a>
           )}
         </div>
+
+        {facts && (
+          <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-2 rounded-2xl border border-border bg-surface/40 px-4 py-3 text-sm sm:grid-cols-4 lg:grid-cols-7">
+            {[
+              ["Location", facts.location || "—"],
+              ["Posted", facts.posted || "—"],
+              ["Deadline", facts.deadline || "Not stated"],
+              ["Suitability", facts.suitability != null ? `${facts.suitability}/10` : "—"],
+              ["Stage", facts.stage],
+              ["Documents", `${facts.cv ? "CV ✓" : "CV —"} · ${facts.cover ? "Cover ✓" : "Cover —"}`],
+              ...(LEAD ? [["Lead with", toRegExp(LEAD.when).test(archetype || app?.role || "") ? LEAD.then : LEAD.otherwise]] : []),
+            ].map(([k, v]) => (
+              <div key={k}>
+                <dt className="font-mono text-[10px] uppercase tracking-[0.14em] text-faint">{k}</dt>
+                <dd className="mt-0.5 font-medium text-foreground">{v}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+        {applyUrl && (
+          <p className="mt-2 text-sm">
+            <a href={applyUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-medium text-brand hover:underline">
+              Open the original posting and application page <ExternalLink className="size-3.5" />
+            </a>
+            <span className="ml-2 text-xs text-muted">You submit the application yourself; Career-Ops never applies for you.</span>
+          </p>
+        )}
+        {manualJob && (
+          <p className="mt-3 rounded-xl border border-border bg-surface-hover/60 px-3 py-2 text-xs text-muted">
+            <b className="text-foreground">Added manually.</b> Its suitability on All Job Opportunities is a preliminary rating calculated on this computer from the job description you pasted (shown below); it has not had a detailed AI evaluation. The CV and cover letter are tailored from that job description.
+            {manualJob.jdUpdatedAt && <> Job description last edited {new Date(manualJob.jdUpdatedAt).toLocaleString("en-AU", { timeZone: "Australia/Sydney", dateStyle: "medium", timeStyle: "short" })}.</>}
+          </p>
+        )}
+        {manualJob?.outdated && (
+          <p className="mt-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <b>Documents may be outdated.</b> The job description was edited after this CV and cover letter were generated. They have not been changed. Use Regenerate below if you want versions based on the new description; the current files stay as they are.
+          </p>
+        )}
+        {app && <OriginalDocsButton n={id} hasReport={Boolean(report)} hasDocs={Boolean(docState?.cv) || Boolean(facts?.cv && facts?.cover) || (Boolean(facts?.cv) && app.company === "?")} hasCover={Boolean(docState?.cover ?? facts?.cover)} confidential={app.company === "?"} lastQuality={lastQuality} panel={docsPanel} generator={generator} applied={["Applied", "Responded", "Interview", "Assessment", "Offer", "Hired"].includes(app.status)} />}
+
 
         {app && canDelete && (
           <div className="mt-3">

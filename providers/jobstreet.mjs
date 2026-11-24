@@ -46,7 +46,8 @@ import { fetchJsonWithRetry, sleep } from "./_http.mjs";
 //   ID-Main  → id.jobstreet.com (Indonesia)
 //   SG-Main  → sg.jobstreet.com (Singapore)
 //   MY-Main  → my.jobstreet.com (Malaysia)
-//   AU-Main  → www.seek.com.au  (Australia — set api: https://www.seek.com.au/api/jobsearch/v5/search)
+//   AU-Main  → au.seek.com      (Australia — set api: https://au.seek.com/api/jobsearch/v5/search;
+//                                 www.seek.com.au now 308-redirects there and fails)
 //   NZ-Main  → www.seek.co.nz   (New Zealand)
 //   HK-Main  → hk.jobsdb.com    (Hong Kong)
 //
@@ -85,6 +86,9 @@ const ALLOWED_JOBSTREET_HOSTS = new Set([
   "my.jobstreet.com",
   // SEEK's Hong Kong property keeps the JobsDB brand; same v5 search API.
   "hk.jobsdb.com",
+  // SEEK Australia moved its v5 API to au.seek.com: www.seek.com.au now
+  // answers with a 308 to it, which the no-redirect fetch rejects.
+  "au.seek.com",
   "www.seek.com.au",
   "www.seek.co.nz",
 ]);

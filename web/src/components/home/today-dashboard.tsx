@@ -198,7 +198,7 @@ export function TodayDashboard({
             <Link href="/explore" className="inline-flex items-center gap-2 rounded-full bg-brand px-5 py-2.5 text-sm font-medium text-brand-foreground transition hover:bg-brand-200 max-sm:min-h-[44px]">
               Find new roles <ArrowRight className="size-4" />
             </Link>
-            <Link href="/pipeline" className="inline-flex items-center gap-2 rounded-full border border-border px-5 py-2.5 text-sm font-medium text-foreground transition hover:border-brand/40 hover:text-brand max-sm:min-h-[44px]">
+            <Link href="/opportunities" className="inline-flex items-center gap-2 rounded-full border border-border px-5 py-2.5 text-sm font-medium text-foreground transition hover:border-brand/40 hover:text-brand max-sm:min-h-[44px]">
               Open pipeline
             </Link>
           </div>
@@ -237,7 +237,7 @@ export function TodayDashboard({
             {upcoming.map((item) => (
               <li key={`${item.num ?? item.company}-${item.nextFollowupDate ?? ""}`}>
                 <Link
-                  href={item.num != null ? `/pipeline/${item.num}` : "/followups"}
+                  href={item.num != null ? `/opportunities/${item.num}` : "/followups"}
                   className="text-sm text-muted hover:text-brand"
                 >
                   <span className="font-medium text-foreground">{item.company}</span>
@@ -255,7 +255,7 @@ export function TodayDashboard({
         <Section icon={CircleHelp} title="Awaiting your decision" hint="Best score first">
           {recommended.length > 0 && (
             <Link
-              href={`/pipeline/${recommended[0].n}`}
+              href={`/opportunities/${recommended[0].n}`}
               className="mb-3 inline-flex items-center gap-2 rounded-full bg-brand px-4 py-2 text-sm font-medium text-brand-foreground transition hover:bg-brand-200 max-sm:min-h-[44px]"
             >
               Apply next · {companyPresentation(recommended[0]).label} {recommended[0].score} <ArrowRight className="size-4" />
@@ -294,7 +294,7 @@ export function TodayDashboard({
         <div className="mt-8 rounded-2xl border border-border bg-surface/30 px-6 py-10 text-center">
           <Sparkles className="mx-auto size-6 text-brand" />
           <p className="mx-auto mt-3 max-w-md text-sm text-muted">
-            Nothing needs you right now. Run a <Link href="/explore" className="text-brand hover:underline">free scan</Link> to surface this week&apos;s roles, or check your <Link href="/pipeline" className="text-brand hover:underline">pipeline</Link>.
+            Nothing needs you right now. Run a <Link href="/explore" className="text-brand hover:underline">free scan</Link> to surface this week&apos;s roles, or check your <Link href="/opportunities" className="text-brand hover:underline">pipeline</Link>.
           </p>
         </div>
       )}

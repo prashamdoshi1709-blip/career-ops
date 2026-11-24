@@ -63,9 +63,11 @@ export async function GET(req: NextRequest) {
     if (exact.status === "rejected" || kind === "cover") {
       return new Response(kind === "cover" ? "indexed cover letter is unavailable" : "indexed tailored CV is unavailable", { status: 404 });
     }
-    // No index entry (e.g. a report generated before pdf-index.tsv existed) —
-    // fall through to the company-slug heuristic below rather than 404 on a
-    // real, existing tailored CV.
+    // Local customisation (2026-11-11): a request for a SPECIFIC job never falls
+    // back to the company-slug guess. That guess could open a generic-template
+    // CV from the retired pdf worker (output/cv-*.pdf) instead of this job's own
+    // original-format document.
+    return new Response("no tailored CV is indexed for this job yet", { status: 404 });
   }
 
   // Same shape as the "n" path above, but resolved through the tracker row's

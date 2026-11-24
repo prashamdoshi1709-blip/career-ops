@@ -3,13 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import * as yaml from "js-yaml";
 import { careerOpsRoot, rootScript } from "@/lib/career-ops";
-import { writeTempPortals, cleanupTempPortals } from "./portals";
+import { writeTempPortals, writePortalsScanFile, cleanupTempPortals } from "./portals";
+import { AU_GROUPS, runPortalsScan, ingestPortalsOffers } from "./portals-scan";
 import { profileTargetKeywords } from "@/lib/profile-keywords.mjs";
 import { getProfilePath } from "@/lib/core/profile-path.mjs";
 import { titleFit } from "@/lib/title-fit.mjs";
 import { resolveScanTimeoutMs, scanTimeoutMessage } from "./scan-timeout.mjs";
 import { ATS_LABEL, ATS_SOURCES, type AtsSource, type DiscoveredOffer, type ExploreFilters, type FitBand, type ScanEvent } from "@/lib/explore";
-import { mergeScanResults, timedOutMessage } from "./scan-merge.mjs";
+import { mergeScanResults, portalsGroupState, sourceState, timedOutMessage } from "./scan-merge.mjs";
 import { parseScanJsonStdout } from "./scan-json.mjs";
 import { scannerArgs } from "./scan-args.mjs";
 
@@ -145,12 +146,15 @@ export function scannerSupportsJson(): boolean {
   }
 }
 
+/** Rotation coverage per source from scan-ats-full.mjs --rotate (2026-11-22). */
+export type DirectoryCoverage = { available: number; coveredEver: number; covered30d: number; notYetScanned: number };
 type JsonOffer = { company?: string; title?: string; url?: string; location?: string | null; postedAt?: string | null; source?: string };
 type ScanJson = {
   companiesAvailable?: number;
   companiesScanned?: number;
   capHit?: boolean;
   datasetStatus?: Record<string, "ok" | "stale" | "empty">;
+  coverage?: Record<string, DirectoryCoverage>;
   postingsKept?: number;
   postingsDroppedNoDate?: number;
   unreachableBoards?: number;
@@ -199,7 +203,9 @@ function runScanner(
   return new Promise((resolve) => {
     const args = [
       rootScript("scan-ats-full"),
-      ...scannerArgs({ ats, json: useJson, sinceDays: filters.sinceDays, limitPerAts: filters.limitPerAts }),
+      // Stop claiming new boards 25s before the kill deadline, so a run ends with
+      // its coverage saved instead of being cut off.
+      ...scannerArgs({ ats, json: useJson, sinceDays: filters.sinceDays, limitPerAts: filters.limitPerAts, budgetSeconds: Math.max(30, timeoutMs / 1000 - 25) }),
     ];
 
     const child = spawn(process.execPath, args, {
@@ -370,6 +376,7 @@ function runScanner(
 
 const NO_OUTPUT = "The scanner returned no readable output.";
 
+
 export async function runDiscovery(filters: ExploreFilters, onEvent: (e: ScanEvent) => void): Promise<DiscoveredOffer[]> {
   const tempPortals = writeTempPortals(filters);
   const ats = (filters.ats.length ? filters.ats : [...ATS_SOURCES]).filter((a) => (ATS_SOURCES as readonly string[]).includes(a));
@@ -398,9 +405,15 @@ export async function runDiscovery(filters: ExploreFilters, onEvent: (e: ScanEve
     // --json: one child per source, in parallel (see scan-merge.mjs for why).
     // Dry runs write no scanner state and each source caches its own dataset
     // file, so the children don't contend.
+    // Australian finance sources first (SEEK, recruiters, employer sites), in
+    // parallel with the directories and inside the same deadline.
+    const portalsFile = filters.preset ? null : writePortalsScanFile(filters);
+    const portalsRun = portalsFile ? runPortalsScan(portalsFile, Math.max(30_000, timeoutMs - 10_000), onEvent).finally(() => cleanupTempPortals(portalsFile)) : Promise.resolve(null);
     const runs = await Promise.all(
       ats.map((a) => runScanner([a], true, filters, tempPortals, onEvent, sink, timeoutMs, roleTargets)),
     );
+    const portals = await portalsRun;
+    if (portals?.receipt) ingestPortalsOffers(portals.receipt, sink, onEvent, (title) => ({ matchedKeyword: firstMatch(title, filters.positive), ...fitField(title, roleTargets) }));
 
     const { offers, seen } = sink;
     const finished: ScanJson[] = [];
@@ -436,6 +449,11 @@ export async function runDiscovery(filters: ExploreFilters, onEvent: (e: ScanEve
       kind: "summary",
       ...mergeScanResults(finished, offers.length),
       ...(incomplete.length ? { incomplete } : {}),
+      sourceStates: [
+        ...(portals ? AU_GROUPS.map((g) => portalsGroupState(g, portals)) : []),
+        ...ats.map((a, i) => sourceState(a, { json: runs[i].json, timedOut: runs[i].timedOut, failed: runs[i].failed })),
+      ],
+      ...(portals?.receipt?.groups ? { groups: portals.receipt.groups } : {}),
     });
     return offers;
   } finally {

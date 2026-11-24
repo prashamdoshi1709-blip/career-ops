@@ -11,7 +11,9 @@ import { assertScheduledJobBody } from "./scheduled-job-input.mjs";
 import { scheduledStorePath } from "./scheduled-runner-path.mjs";
 
 export type JobStatus = "active" | "paused" | "deleted";
-export type ScanEngine = "full" | "portals";
+/** "sweep" (2026-11-22): progressive directory sweep that continues where the last run stopped. */
+/** "recruiters" (2026-11-23): specialist recruiter sites only (source_type: specialist_recruiter). */
+export type ScanEngine = "full" | "portals" | "sweep" | "recruiters";
 export type ScheduleUnit = "minutes" | "hours" | "days";
 
 export type ScheduledJob = {
@@ -29,6 +31,8 @@ export type ScheduledJob = {
   updatedAt: string;
   lastRunAt?: string;
   lastError?: string;
+  /** 2026-11-23: source failures, rate limits or paused Workday clusters in a run that still exited successfully. */
+  lastWarning?: string;
   rolesFoundCount?: number;
 };
 
@@ -42,6 +46,7 @@ export type JobRun = {
   message?: string;
   rolesFound?: number;
   engine?: ScanEngine;
+  warnings?: string;
 };
 
 type QueueItem = { id: string; jobId: string; queuedAt: string };
@@ -96,8 +101,8 @@ export function parseScheduledJobInput(raw: unknown, base?: ScheduledJob): JobFi
   }
   const fallbackName = base?.name || "Scheduled scan";
   const name = String(input.name ?? fallbackName).trim().slice(0, 80) || fallbackName;
-  if (input.engine !== undefined && input.engine !== "portals" && input.engine !== "full") throw new ScheduledJobValidationError("Invalid scan engine.");
-  const engine: ScanEngine = input.engine === "portals" || input.engine === "full" ? input.engine : base?.engine || "full";
+  if (input.engine !== undefined && !["portals", "full", "sweep", "recruiters"].includes(String(input.engine))) throw new ScheduledJobValidationError("Invalid scan engine.");
+  const engine: ScanEngine = input.engine === "portals" || input.engine === "full" || input.engine === "sweep" || input.engine === "recruiters" ? input.engine : base?.engine || "full";
   const unit = cleanUnit(input.unit, base?.unit || "hours");
   const every = cleanEvery(input.every, unit, base?.every || 1);
   const timezone = validateTimezone(String(input.timezone ?? base?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC")

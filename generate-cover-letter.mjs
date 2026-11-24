@@ -16,13 +16,13 @@
 
 import { readFileSync, existsSync, mkdirSync } from "fs";
 import { dirname, resolve, join, relative, isAbsolute } from "path";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { parseArgs } from "util";
 import { assertFacts, printFactWarnings } from "./verify-cv-facts.mjs";
 import { resolveTemplate } from "./cv-templates.mjs";
 import { isMainModule } from "./lib/is-main-module.mjs";
 import { PAGE_FORMATS, normalizePageFormat, pageFormatForCountry } from "./lib/page-format.mjs";
-import { getCareerOpsRoot } from "./path-resolver.mjs";
+import { getCareerOpsRoot, getProfilePath } from "./path-resolver.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // output/ is a USER-layer directory. Anchoring it to the script directory made
@@ -503,10 +503,37 @@ Usage:
       console.error(`CV fact check warning: cover letter`);
       printFactWarnings(factCheck, console.error);
     }
+    // Local customisation (2026-11-19): one approved letter design for every
+    // route. With `cover_letter.renderer: original` in config/profile.yml the
+    // letter is rendered by data/cv-original/render.mjs (the original design,
+    // master reference: the approved reference letter), after the fact gate above.
+    const outputPath = resolve(payload.output_path);
+    const originalAdapter = resolve(dirname(fileURLToPath(import.meta.url)), "data", "cv-original", "original-cover.mjs");
+    const profilePath = getProfilePath(); // user layer: data root, or CAREER_OPS_PROFILE
+    if (existsSync(originalAdapter) && existsSync(profilePath)) {
+      const adapter = await import(pathToFileURL(originalAdapter).href);
+      if (adapter.originalRendererSelected(readFileSync(profilePath, "utf-8"))) {
+        const specPath = adapter.renderOriginalCover(payload, outputPath);
+        if (args.report) {
+          // Same manifest row renderHtmlToPdf would write (kind: cover).
+          const { applyManifestRow } = await import("./generate-pdf.mjs");
+          const { writeFileAtomic } = await import("./tracker-utils.mjs");
+          const { withPipelineLock } = await import("./pipeline-lock.mjs");
+          const idxPath = join(getCareerOpsRoot(), "data", "pdf-index.tsv");
+          const rel = (p) => relative(getCareerOpsRoot(), p).split("\\").join("/");
+          await withPipelineLock(idxPath, () => {
+            const ls = existsSync(idxPath) ? readFileSync(idxPath, "utf-8").split("\n").filter((l) => !l.startsWith("#")) : [];
+            const out = applyManifestRow(ls, { reportNum: args.report, pdf: rel(outputPath), html: rel(outputPath.replace(/\.pdf$/i, ".html")), format: "a4", date: new Date().toISOString().slice(0, 10), kind: "cover" });
+            writeFileAtomic(idxPath, "# report\tpdf\thtml\tformat\tdate\tkind - written by generate-pdf.mjs, do not edit\n" + out.filter(Boolean).join("\n") + "\n");
+          });
+        }
+        console.log(`\nCover letter PDF (original design): ${payload.output_path}\nSpec: ${specPath}`);
+        return;
+      }
+    }
     // Imported only after fact validation so a failed gate does not load
     // Playwright or create a PDF artifact.
     const { renderHtmlToPdf } = await import("./generate-pdf.mjs");
-    const outputPath = resolve(payload.output_path);
     await renderHtmlToPdf(html, outputPath, {
       // Passed through unresolved. renderHtmlToPdf ranks it against the user's
       // config/profile.yml, so a cover letter and its CV cannot end up on

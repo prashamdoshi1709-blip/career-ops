@@ -126,10 +126,10 @@ test("every loading state exports a component", () => {
 
 test("a detail route does not inherit its parent's list skeleton", () => {
   // A loading.tsx covers its segment AND everything nested under it, so without
-  // its own, /pipeline/[id] flashes a table skeleton before rendering one report
+  // its own, /opportunities/[id] flashes a table skeleton before rendering one report
   // — a skeleton that lies about the shape of what is coming is worse than a
   // plain spinner. Named explicitly so deleting one fails with the reason.
-  for (const rel of [join("pipeline", "[id]"), join("jobs", "[id]")]) {
+  for (const rel of [join("opportunities", "[id]"), join("jobs", "[id]")]) {
     assert.doesNotThrow(
       () => statSync(join(APP, rel, "loading.tsx")),
       `${rel} must have its own loading.tsx — without it the route inherits the ` +

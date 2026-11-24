@@ -245,17 +245,16 @@ export function FilterBuilder({
             <KeywordField ariaLabel="Never include" values={filters.blockHard} tone="exc" placeholder="USA, Brazil…" onChange={(v) => set({ blockHard: v })} />
           </div>
           <div>
-            <Label hint={`${filters.limitPerAts} companies / source`}>Scan depth</Label>
-            <input
-              type="range"
-              min={50}
-              max={500}
-              step={50}
+            <Label hint={filters.limitPerAts ? `${filters.limitPerAts} companies / source` : "as many as the time allows; continues next run"}>Scan depth</Label>
+            <select
               value={filters.limitPerAts}
               aria-label="Scan depth"
               onChange={(e) => set({ limitPerAts: Number(e.target.value) })}
-              className="w-full accent-brand"
-            />
+              className="w-full rounded-lg border border-border bg-transparent px-2 py-1.5 text-sm"
+            >
+              <option value={0}>No cap: continue through the whole directory</option>
+              {[100, 250, 500, 1000, 2500].map((n) => <option key={n} value={n}>{n.toLocaleString()} companies per source</option>)}
+            </select>
           </div>
         </div>
       )}

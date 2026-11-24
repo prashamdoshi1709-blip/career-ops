@@ -124,7 +124,7 @@ function parseLocation(block) {
  * @param {string} url
  */
 export function assertParsedSomething(html, url) {
-  if (!/\/JobDetail\/[^"'\s]+/i.test(String(html ?? ''))) return;
+  if (!/\/(?:JobDetail|FolderDetail)\/[^"'\s]+/i.test(String(html ?? ''))) return;
   throw new Error(
     `avature: ${url} still contains JobDetail links but no article could be parsed — the listing markup changed`,
   );
@@ -152,6 +152,8 @@ export function parseArticles(htmlText, origin) {
   let a;
   while ((a = re.exec(htmlText)) !== null) {
     const block = a[0];
+    // Bain (careers.bain.com/jobs/…) links postings as FolderDetail/ rather than
+    // JobDetail/; both are accepted (2026-11-11 local change).
     // JobDetail path may or may not sit under /careers/ (branded tenants vary),
     // so anchor on JobDetail/ itself rather than a fixed prefix. Prefer the
     // `class="link"` title anchor (most tenants); fall back to any JobDetail
@@ -161,15 +163,15 @@ export function parseArticles(htmlText, origin) {
     // An `article--jobs` card's class="link" anchor is a "View more" button, so
     // its h3 header title anchor is tried first.
     const urlM =
-      block.match(/article__header__text__title[^>]*>\s*<a[^>]*href="([^"]*\/JobDetail\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/) ||
-      block.match(/<a[^>]*class="link"[^>]*href="([^"]*\/JobDetail\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/) ||
-      block.match(/<a[^>]*href="([^"]*\/JobDetail\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+      block.match(/article__header__text__title[^>]*>\s*<a[^>]*href="([^"]*\/(?:JobDetail|FolderDetail)\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/) ||
+      block.match(/<a[^>]*class="link"[^>]*href="([^"]*\/(?:JobDetail|FolderDetail)\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/) ||
+      block.match(/<a[^>]*href="([^"]*\/(?:JobDetail|FolderDetail)\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/);
     if (!urlM) continue;
     const title = clean(urlM[2]);
     if (!title) continue;
     let url = decodeEntities(urlM[1]);
     if (!/^https?:\/\//i.test(url)) url = origin + (url.startsWith('/') ? url : '/' + url);
-    const idM = url.match(/\/JobDetail\/[^/]*\/(\d+)/);
+    const idM = url.match(/\/(?:JobDetail|FolderDetail)\/[^/]*\/(\d+)/);
     out.push({
       id: idM ? idM[1] : url,
       title,

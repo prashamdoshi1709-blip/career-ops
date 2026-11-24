@@ -30,6 +30,7 @@
  *   node scan.mjs --verify --throttle=8000     # custom base gap in ms (waits base..2*base)
  *   node scan.mjs --include-blacklisted        # let data/blacklist.md matches through (annotated)
  *   node scan.mjs --since 7                    # postings from the last 7 days
+  node scan.mjs --source-type specialist_recruiter   # only entries with that source_type
  *   node scan.mjs --posted-after 2026-07-01    # absolute lower bound on posting date
  *   node scan.mjs --posted-before 2026-08-01   # absolute upper bound on posting date
  *   node scan.mjs --rediscover-404             # re-verify tracked URLs that 404/410 (rides on --verify)
@@ -57,7 +58,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import { loadYaml } from './lib/yaml-document.mjs';
 
-import { makeHttpCtx } from './providers/_http.mjs';
+import { makeHttpCtx, parseRetryAfterMs } from './providers/_http.mjs';
 import { buildTrustValidator } from './providers/_trust-validator.mjs';
 import { loadProviders, resolveProvider } from './providers/_registry.mjs';
 import { mergeProviderPlugins } from './plugins/_engine.mjs';
@@ -69,9 +70,11 @@ import { workdayDedupKey, stripWorkdayRepostSuffix, isWorkdayJobUrl } from './pr
 import { normalizeCompany, appendLedgerRows } from './tracker-utils.mjs';
 import { normalizeCompanyName } from './invite-match.mjs';
 import { withPipelineLock } from './pipeline-lock.mjs';
-import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, foldTitle } from './title-keywords.mjs';
+import { compileKeyword, compilePositiveKeyword, compileContentKeyword, buildTitleFilter, foldTitle, negativeExemptPhrases, withoutExemptPhrases } from './title-keywords.mjs';
 import { flagValue, hasFlag, validateFlags } from './lib/cli-flags.mjs';
 import { withPortalHealthLock } from './portal-health-lock.mjs';
+import { deferredByRateLimit } from './portal-health-status.mjs';
+import { openRateLimitBook } from './rate-limit-state.mjs';
 import { localToday } from './lib/local-today.mjs';
 import { printScanSummaryHeader } from './lib/scan-summary-marker.mjs';
 import { isMainModule } from './lib/is-main-module.mjs';
@@ -131,6 +134,16 @@ const PROVIDERS_DIR = path.resolve(CODE_ROOT, 'providers');
 // to leave a stray data/ in whatever cwd it ran from.
 
 const CONCURRENCY = 10;
+// Lower caps for providers whose tenants share one rate limiter (2026-11-22).
+export const PROVIDER_CONCURRENCY = { workday: 2, oraclecloud: 2, successfactors: 2 };
+const providerSlots = new Map();
+export async function withProviderSlot(id, cap, fn) {
+  const s = providerSlots.get(id) ?? { active: 0, queue: [] };
+  providerSlots.set(id, s);
+  if (s.active >= cap) await new Promise((resolve) => s.queue.push(resolve));
+  s.active++;
+  try { return await fn(); } finally { s.active--; s.queue.shift()?.(); }
+}
 const PROGRESS_EVERY = 25;
 
 export function isIgnorableDirectoryFsyncError(err, platform = process.platform) {
@@ -322,7 +335,8 @@ export function buildTitleFilterWithOverrides(titleFilter, overridesMap) {
     const extra = overrides.get(String(companySlug ?? '').trim().toLowerCase());
     if (!extra || extra.length === 0) return false;
     const lower = String(title ?? '').toLowerCase();
-    if (negative.some(m => m(lower))) return false;
+    const vetoText = withoutExemptPhrases(foldTitle(title ?? ''), negativeExemptPhrases(titleFilter));
+    if (negative.some(m => m(vetoText))) return false;
     return extra.some(m => m(lower));
   };
 }
@@ -3365,6 +3379,16 @@ export async function appendToPipeline(offers, { pipelinePath = PIPELINE_PATH } 
       ? readFileSync(pipelinePath, 'utf-8')
       : PIPELINE_SKELETON;
 
+    // 2026-11-23: re-check under the lock. Two scans that overlap (the
+    // scheduler and a manual run) each load the seen set at start, so both can
+    // decide the same new URL is unseen; the second writer drops it here.
+    // Exact URL (minus a trailing slash), not normalizeUrlForDedup: language
+    // versions a scan keeps apart on purpose must stay apart here too.
+    const exact = (u) => String(u ?? '').trim().replace(/\/+$/, '');
+    const present = new Set([...text.matchAll(/https?:\/\/[^\s|)\]>]+/g)].map((m) => exact(m[0])));
+    offers = offers.filter((o) => !present.has(exact(o.url)));
+    if (offers.length === 0) return;
+
     const headings = [...text.matchAll(/^##[ \t].*$/gm)];
     const pending = headings.find(h => sectionKind(h[0]) === 'pending');
 
@@ -3707,6 +3731,16 @@ export async function appendPortalHealth(healthRecords, filePath = PORTAL_HEALTH
   });
 }
 
+export const SOURCE_CHECKS_HEADER = 'timestamp\tcompany\tstatus\tretrieved\n';
+export const SOURCE_CHECKS_PATH = path.join(DATA_ROOT, 'data/source-checks.tsv');
+/** Append-only per-run check log for specialist recruiter sources. */
+export function appendSourceChecks(rows, filePath = SOURCE_CHECKS_PATH) {
+  mkdirSync(path.dirname(filePath), { recursive: true });
+  if (!existsSync(filePath)) atomicWriteFile(filePath, SOURCE_CHECKS_HEADER);
+  const lines = rows.map((r) => [r.timestamp, r.company, r.status, r.retrieved].map((v) => String(v ?? '').replace(/[\t\n]/g, ' ')).join('\t')).join('\n') + '\n';
+  appendLedgerRows(filePath, lines);
+}
+
 export function loadPortalHealth(filePath = PORTAL_HEALTH_PATH) {
   if (!existsSync(filePath)) return [];
   const lines = readFileSync(filePath, 'utf-8').split('\n');
@@ -3731,6 +3765,10 @@ export function computeConsecutiveFailures(healthRecords) {
     // 'empty' is deliberately healthy: a live board with 0 jobs is reachable.
     if (r.status === 'reachable' || r.status === 'empty') {
       streaks.set(r.company, 0);
+    } else if (r.status === 'rate_limited') {
+      // 2026-11-22: a 429 says the board is alive but busy; it neither counts
+      // toward the dead-portal streak nor resets it.
+      continue;
     } else {
       streaks.set(r.company, (streaks.get(r.company) || 0) + 1);
     }
@@ -3906,6 +3944,14 @@ export async function verifyOffers(offers, { headedFallback = false, throttleBas
         // with a precise status, dedup-blocking them on subsequent scans.
         invalid.push({ ...offer, code, reason });
         console.log(`  ⛔ invalid   ${offer.company} | ${offer.title} (${reason})`);
+      } else if (result === 'uncertain' && code === 'no_apply_control' && offer.listingConfirmed === true) {
+        // 2026-11-23: a specialist recruiter's mandate page takes applications by
+        // email or a pop-up form, so there is no Apply control to find. The role
+        // was read from the recruiter's live listing moments ago, which is the
+        // open signal; a 404/410 or an expired notice is still handled above.
+        verified.push(offer);
+        verificationStatusByOffer.set(offer, 'active');
+        console.log(`  ✅ listed    ${offer.company} | ${offer.title} (on the recruiter's live listing)`);
       } else if (result === 'uncertain' && code === 'no_apply_control') {
         // Page loaded but classifier could not find an Apply control. Drop from
         // pipeline and record in scan-history for visibility only: the row does
@@ -3957,14 +4003,14 @@ function guardStatusFor(code) {
 const KNOWN_FLAGS = [
   '--dry-run', '--verify', '--headed-fallback', '--throttle', '--rediscover-404',
   '--include-blacklisted', '--company', '--posted-after', '--posted-before',
-  '--since', '--quiet', '--json', '--help', '-h',
+  '--since', '--quiet', '--json', '--help', '-h', '--source-type',
 ];
 
 // Flags whose space-separated value is the NEXT argv token (the `--flag=value`
 // form is self-contained and never needs this). --throttle is deliberately
 // excluded: only its bare and `--throttle=<ms>` forms are read below, so a
 // following token is never its value.
-const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since'];
+const VALUE_FLAGS = ['--company', '--posted-after', '--posted-before', '--since', '--source-type'];
 
 const USAGE = `Usage:
   node scan.mjs                              # scan all enabled companies
@@ -3977,6 +4023,7 @@ const USAGE = `Usage:
   node scan.mjs --rediscover-404             # re-verify tracked URLs that 404/410 (rides on --verify)
   node scan.mjs --include-blacklisted        # let data/blacklist.md matches through (annotated)
   node scan.mjs --since 7                    # postings from the last 7 days
+  node scan.mjs --source-type specialist_recruiter   # only entries with that source_type
   node scan.mjs --posted-after 2026-07-01    # absolute lower bound on posting date
   node scan.mjs --posted-before 2026-08-01   # absolute upper bound on posting date
   node scan.mjs --json                       # emit one machine-readable receipt on stdout
@@ -4024,6 +4071,9 @@ async function main() {
     return value;
   };
   const filterCompany = requireValue('--company')?.toLowerCase() ?? null;
+  // 2026-11-23: --source-type <type> scans only entries with that source_type
+  // (e.g. specialist_recruiter, run daily by the scheduler).
+  const filterSourceType = requireValue('--source-type') ?? null;
   // --posted-after / --posted-before <YYYY-MM-DD>: absolute-date bounds on the
   // employer's real posting date (job.postedAt), gated against a typo since a
   // silently-ignored bound would look like "no jobs matched" instead of an error.
@@ -4093,7 +4143,11 @@ async function main() {
   const config = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
   const companies = Array.isArray(config.tracked_companies) ? config.tracked_companies : [];
   const boards = Array.isArray(config.job_boards) ? config.job_boards : [];
-  const titleFilter = buildTitleFilter(config.title_filter);
+  // Local change (2026-11-11): per-company title_filter_overrides (portals.yml),
+  // keyed by the tracked company name, broaden the title net for listed
+  // employers only (e.g. plain "Consultant" at strategy firms). Companies not
+  // listed are filtered exactly as before.
+  const titleFilter = buildTitleFilterWithOverrides(config.title_filter, buildTitleFilterOverrides(config.title_filter_overrides));
 
   // Seniority tier classifier integration
   let classifyTier = null;
@@ -4142,6 +4196,7 @@ async function main() {
         continue;
       }
       if (filterCompany && !entry.name.toLowerCase().includes(filterCompany)) continue;
+      if (filterSourceType && entry.source_type !== filterSourceType) continue;
 
       const resolved = resolveProvider(entry, providers);
       if (!resolved) {
@@ -4309,6 +4364,8 @@ async function main() {
   let totalFilteredVisa = 0;
   let totalDupes = 0;
   const newOffers = [];
+  // Postings each source returned this run (2026-11-23), for data/source-checks.tsv.
+  const retrievedByCompany = new Map();
   const verifyDedupKeys = new Map();
   const errors = [...resolveErrors];
   const emptyTargets = [];
@@ -4340,8 +4397,29 @@ async function main() {
     });
   }
 
+  // 2026-11-22: a board that answered HTTP 429 is skipped until its backoff
+  // window passes (portal-health-status.mjs: 1h, 2h, 4h ... 24h). Never a
+  // retry storm, never a rewritten URL. --ignore-rate-limit-backoff opts out.
+  const rateDeferred = args.includes('--ignore-rate-limit-backoff') ? new Map() : deferredByRateLimit(loadPortalHealth());
+  const deferredNow = targets.filter((t) => rateDeferred.has(t.name));
+  if (deferredNow.length) {
+    console.log(`Deferred ${deferredNow.length} rate-limited portal(s) until their backoff passes: ${deferredNow.map((t) => `${t.name} (after ${rateDeferred.get(t.name).retryAfter.slice(0, 16)})`).join(', ')}`);
+    for (let i = targets.length - 1; i >= 0; i--) if (rateDeferred.has(targets[i].name)) targets.splice(i, 1);
+  }
+
+  // 2026-11-23: shared rate-limit circuits (rate-limit-state.mjs), the same
+  // file scan-ats-full.mjs uses, so a Workday cluster that is limiting this
+  // machine gets no requests from either scanner until its cooldown passes.
+  const rateBook = openRateLimitBook(path.join(DATA_ROOT, 'data/rate-limit-state.json'));
+  const circuitDeferred = new Map();
+  // Per-target figures for the source analytics (data/source-runs.jsonl).
+  const companyStats = new Map();
+  const statFor = (name) => { if (!companyStats.has(name)) companyStats.set(name, { retrieved: 0, matched: 0, dupes: 0, newUnique: 0, added: 0 }); return companyStats.get(name); };
+
   const tasks = targets.map(company => async () => {
     let provider = company._provider;
+    const circuit = rateBook.check(company.careers_url || company.api);
+    if (circuit && !circuit.allow) { circuitDeferred.set(company.name, circuit); return; }
     const observation = { requests: 0, successfulResponses: 0, lastStatus: null };
     // includeUndated is deliberately ALWAYS true, independent of the window.
     // It does not mean "include undated postings in the results" — scan.mjs
@@ -4365,7 +4443,10 @@ async function main() {
           if (status >= 200 && status < 300) observation.successfulResponses++;
         },
       }),
-      sinceMs: earlyStopSinceMs,
+      // An evergreen employer (max_posting_age_days: 0) is read in full.
+      // A company with its own max_posting_age_days is read past the run's
+      // --since bound (0 = no limit); its own age filter applies below.
+      sinceMs: company.max_posting_age_days != null ? (Number(company.max_posting_age_days) > 0 ? Date.now() - Number(company.max_posting_age_days) * 86_400_000 : undefined) : earlyStopSinceMs,
       includeUndated: true,
       locationHints: config.location_filter,
       // A provider that serves extra language versions of a posting at extra
@@ -4378,7 +4459,7 @@ async function main() {
       // posting (Workday's multi-location detail GETs) and can skip postings
       // the title filter below will drop. Absent when this company's filter_on
       // leaves the title out, since then no title is dropped.
-      ...(normalizeFilterOn(company.filter_on).includes('title') ? { titleWanted: (title) => titleFilter(title) } : {}),
+      ...(normalizeFilterOn(company.filter_on).includes('title') ? { titleWanted: (title) => titleFilter(title, company.name) } : {}),
     };
     let sourceName = provider.id === 'local-parser' ? 'local-parser' : `${provider.id}-api`;
     try {
@@ -4401,6 +4482,9 @@ async function main() {
         throw new Error(`${provider.id}: fetch() did not return an array`);
       }
       totalFound += jobs.length;
+      retrievedByCompany.set(company.name, jobs.length);
+      statFor(company.name).retrieved = jobs.length;
+      rateBook.record(company.careers_url || company.api, 'ok');
       if (!company._isBoard && jobs.length === 0) {
         if (emptyTargetStatus(observation) === 'empty') emptyTargets.push(company.name);
         else unverifiedZeroTargets.push(company.name);
@@ -4472,7 +4556,7 @@ async function main() {
         let sawAbsentField = false;
         for (const field of declaredFields) {
           if (field === 'title') {
-            if (!titleFilter(job.title)) { failedField = field; break; }
+            if (!titleFilter(job.title, company.name)) { failedField = field; break; }
           } else {
             const value = declaredFieldValue(job, field);
             if (isFieldAbsent(value)) sawAbsentField = true;
@@ -4500,12 +4584,19 @@ async function main() {
           if (!dryRun) locationFilteredOffers.push({ ...job, source: sourceName });
           continue;
         }
-        if (!postingAgeFilter(job.postedAt)) {
+        // Local change (2026-11-11): a tracked company may set its own
+        // max_posting_age_days (0 = no limit) for evergreen postings, e.g. BCG.
+        if (!(company.max_posting_age_days != null ? buildPostingAgeFilter(company.max_posting_age_days) : postingAgeFilter)(job.postedAt)) {
           totalFilteredPostingAge++;
           if (!dryRun) ageFilteredOffers.push({ ...job, source: sourceName });
           continue;
         }
-        if (!postedDateFilter(job.postedAt)) {
+        // Local change (2026-11-23): a company's own max_posting_age_days is
+        // authoritative for it, so it also replaces the run's --since window.
+        // Recruiters keep a mandate on their site while it is open, often for
+        // two or three months; a 30-day --since dropped live private-credit
+        // mandates (Example Recruitment Partners, posted 38 and 70 days earlier).
+        if (company.max_posting_age_days == null && !postedDateFilter(job.postedAt)) {
           totalFilteredPostedDate++;
           continue;
         }
@@ -4525,6 +4616,7 @@ async function main() {
           totalFilteredVisa++;
           continue;
         }
+        statFor(company.name).matched++;
         const dedupUrl = normalizeUrlForDedup(job.url);
         const language = languageFormsForDedup(job.language);
         // A seen URL key passes only as a language version of that posting no
@@ -4541,6 +4633,7 @@ async function main() {
           );
           if (!newLanguageVersion) {
             totalDupes++;
+            statFor(company.name).dupes++;
             continue;
           }
         }
@@ -4560,6 +4653,7 @@ async function main() {
           languages: seenCompanyRoleLanguages, locatedLanguages: locatedLanguagesByBase },
         requisition, dedupIncludeLanguage ? language : [])) {
           totalDupes++;
+          statFor(company.name).dupes++;
           continue;
         }
         const cooldownResult = cooldownFilter(job);
@@ -4600,13 +4694,17 @@ async function main() {
           source: sourceName,
           tracked: Boolean(careersUrlDomain),
           careersUrlDomain,
+          _target: company.name,
         };
+        statFor(company.name).newUnique++;
         newOffers.push(offerForVerification);
         if (verify) verifyDedupKeys.set(offerForVerification, {
           key, baseKey, requisition, language, newLanguageVersion,
         });
       }
     } catch (err) {
+      if (err?.status === 429) rateBook.record(company.careers_url || company.api, 'limited', parseRetryAfterMs(err?.retryAfter));
+      else if (typeof err?.status === 'number') rateBook.record(company.careers_url || company.api, 'ok');
       errors.push({
         company: company.name,
         error: err.message,
@@ -4616,7 +4714,13 @@ async function main() {
     }
   });
 
-  await parallelFetch(tasks, CONCURRENCY, progressTicker(tasks.length));
+  // 2026-11-22: per-provider concurrency caps. Workday tenants sit behind one
+  // WAF, and ten at once drew HTTP 429 on 23 boards in a single run.
+  const gated = tasks.map((task, i) => {
+    const cap = PROVIDER_CONCURRENCY[targets[i]?._provider?.id];
+    return cap ? () => withProviderSlot(targets[i]._provider.id, cap, task) : task;
+  });
+  await parallelFetch(gated, CONCURRENCY, progressTicker(tasks.length));
 
   // 5.5. Optional liveness verification — drop expired and guard-rejected postings
   let verifiedOffers = newOffers;
@@ -4700,6 +4804,7 @@ async function main() {
   if (!dryRun && verifiedOffers.length > 0) {
     await appendToPipeline(verifiedOffers);
     await appendToScanHistory(verifiedOffers, date);
+    for (const o of verifiedOffers) if (o._target) statFor(o._target).added++;
   }
   if (!dryRun && cooldownOffers.length > 0) {
     const cooldownGroups = {};
@@ -4924,7 +5029,13 @@ async function main() {
   const errorKindByCompany = new Map(
     errors.filter((e) => e.kind).map((e) => [e.company, e.kind])
   );
+  if (circuitDeferred.size) {
+    const byKey = {};
+    for (const [n, c] of circuitDeferred) (byKey[`${c.key}${c.until ? ` until ${String(c.until).slice(0, 16)}Z` : ''}`] ??= []).push(n);
+    for (const [k, names] of Object.entries(byKey)) console.log(`Deferred ${names.length} portal(s) on rate-limited ${k} (no request sent): ${names.join(', ')}`);
+  }
   for (const t of targets) {
+    if (circuitDeferred.has(t.name)) continue; // never asked: no health row
     const isEmpty = emptyTargets.includes(t.name);
     const isUnverifiedZero = unverifiedZeroTargets.includes(t.name);
 
@@ -4934,6 +5045,25 @@ async function main() {
 
     healthRecords.push({ timestamp: nowStr, company: t.name, status });
   }
+
+  // Per-group figures (SEEK, tracked employer sites, specialist recruiters),
+  // for data/source-runs.jsonl and the --json receipt (Explore).
+  const groupOfTarget = (t) => t.source_type === 'specialist_recruiter' ? 'recruiters' : t._provider?.id === 'jobstreet' ? 'seek' : 'employers';
+  const sourceGroups = () => {
+    const statusOf = new Map(healthRecords.map((r) => [r.company, r.status]));
+    const groups = {};
+    for (const t of targets) {
+      const g = groups[groupOfTarget(t)] ??= { targets: 0, ok: 0, empty: 0, failed: 0, rateLimited: 0, deferredRateLimit: 0, retrieved: 0, matched: 0, dupes: 0, newUnique: 0, added: 0, providers: {} };
+      g.targets++;
+      g.providers[t._provider?.id ?? 'unknown'] = (g.providers[t._provider?.id ?? 'unknown'] ?? 0) + 1;
+      if (circuitDeferred.has(t.name)) { g.deferredRateLimit++; continue; }
+      const st = statusOf.get(t.name);
+      if (st === 'reachable') g.ok++; else if (st === 'empty' || st === 'unverified_zero') { g.ok++; g.empty++; } else if (st === 'rate_limited') g.rateLimited++; else g.failed++;
+      const cs = companyStats.get(t.name);
+      if (cs) for (const k of ['retrieved', 'matched', 'dupes', 'newUnique', 'added']) g[k] += cs[k];
+    }
+    return groups;
+  };
 
   const pastHealth = loadPortalHealth();
   const currentStreaks = computeConsecutiveFailures([...pastHealth, ...healthRecords]);
@@ -5006,6 +5136,18 @@ async function main() {
   // writes; a --dry-run must leave no trace.
   if (!dryRun) {
     await appendPortalHealth(healthRecords);
+    // 2026-11-23: specialist recruiter sources also log how many postings
+    // they returned, so the dashboard can show a check that succeeded with
+    // listings apart from one that answered empty or failed.
+    const recruiterNames = new Set(targets.filter((t) => t.source_type === 'specialist_recruiter').map((t) => t.name));
+    const checks = healthRecords.filter((r) => recruiterNames.has(r.company))
+      .map((r) => ({ ...r, retrieved: retrievedByCompany.has(r.company) ? retrievedByCompany.get(r.company) : '' }));
+    if (checks.length) appendSourceChecks(checks);
+    // 2026-11-23: one line per run with per-group figures for the dashboard's
+    // source analytics: SEEK, tracked employer sites, specialist recruiters.
+    try {
+      appendLedgerRows(path.join(DATA_ROOT, 'data/source-runs.jsonl'), `${JSON.stringify({ at: nowStr, kind: filterSourceType ? `scan:${filterSourceType}` : 'scan', verify, groups: sourceGroups(), deferredByRateLimitPortalBackoff: deferredNow.length, rateLimits: rateBook.state().circuits })}\n`);
+    } catch (e) { console.error(`source-runs log not written: ${e.message}`); }
     // Locked on the same file the migration locks, for the reason the sibling
     // append at appendToScanHistory already gives: two writers interleaving a
     // read-modify-write on an append-only TSV silently drop each other's rows.
@@ -5048,6 +5190,14 @@ async function main() {
       duplicates: totalDupes,
       added: verifiedOffers.length,
       added_urls: verifiedOffers.map(offer => offer.url),
+      // 2026-11-23: what Explore shows from this scan — each kept posting with
+      // its source group, and per-group figures (dupes = matches already in
+      // Career-Ops). A posting without a date stays dateStatus 'unknown'.
+      offers: verifiedOffers.map((o) => {
+        const t = targets.find((x) => x.name === o._target);
+        return { title: o.title, company: o.company, location: o.location || null, url: o.url, postedAt: Number.isFinite(o.postedAt) ? new Date(o.postedAt).toISOString().slice(0, 10) : null, dateStatus: Number.isFinite(o.postedAt) ? 'dated' : 'unknown', group: t ? groupOfTarget(t) : null, source: o._target ?? null };
+      }),
+      groups: sourceGroups(),
       errors: errors.map(({ company, error }) => ({ company, error })),
       unverified_zero: unverifiedZeroTargets,
       dry_run: dryRun,

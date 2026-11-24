@@ -3,7 +3,7 @@
 // actually goes.
 
 /** Where back goes when the session recorded no origin (a pasted form URL). */
-export const DEFAULT_RETURN_PATH = "/pipeline";
+export const DEFAULT_RETURN_PATH = "/opportunities";
 
 /** Statuses where a step is running that leaving would interrupt. */
 const IN_FLIGHT = new Set(["opening", "driving", "prefilling", "filling"]);

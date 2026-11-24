@@ -34,6 +34,13 @@ export async function POST(req: Request) {
   const body = await readJsonObject<{ kind?: string; input?: string; cliId?: string; brief?: unknown }>(req);
   if (!body) return new Response(JSON.stringify({ error: "bad json" }), { status: 400 });
   const { kind = "evaluate", input, cliId: requestedCliId, brief } = body;
+  // Local customisation (2026-11-10): the generic-template CV ("pdf") and cover
+  // ("cover") workers are retired. They produced documents in a different design
+  // and outside the quality gates; data/cv-original/generate.mjs (job page →
+  // Generate / Revise) is the one document generator.
+  if (kind === "pdf" || kind === "cover") {
+    return new Response(JSON.stringify({ error: "CVs and cover letters are now made in your original format from the job page (Generate CV + cover letter)." }), { status: 410, headers: { "Content-Type": "application/json" } });
+  }
   if (!input || !requestedCliId) {
     return new Response(JSON.stringify({ error: "input and cliId required" }), { status: 400 });
   }
@@ -131,9 +138,13 @@ export async function POST(req: Request) {
   // explicit that a guessed date is worse than an absent one (the POSTED column
   // renders absent as `—`, a wrong date as a fresh req). Unknown URL → undefined
   // → report-persist writes no segment at all.
+  // Local customisation (2026-11-11): the batch evaluator may append the job
+  // description after a marker (see run-prompts.mjs). Only the part before it
+  // is the posting URL; that is what the report, tracker row and dates use.
+  const postingUrl = kind === "evaluate" ? String(input).split("\n\n<<provided-job-description>>\n")[0] : input;
   const postedAt =
     kind === "evaluate"
-      ? readInbox().find((j) => j.url === input)?.postedAt ?? readScanDates().get(input)
+      ? readInbox().find((j) => j.url === postingUrl)?.postedAt ?? readScanDates().get(postingUrl)
       : undefined;
   // Which CV template the worker fills. Resolved HERE, for the same reason `lang`
   // is: the worker has no Bash (#2172), so it cannot run cv-templates.mjs and the
@@ -437,7 +448,7 @@ export async function POST(req: Request) {
             execPath: process.execPath,
             root: careerOpsRoot(),
             markdown,
-            url: input,
+            url: postingUrl,
             today,
             postedAt,
           });

@@ -38,7 +38,7 @@ export function CvStudio({ n }: { n: string }) {
 
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-6 sm:px-6">
-      <Link href={`/pipeline/${n}`} className="inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-brand">
+      <Link href={`/opportunities/${n}`} className="inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-brand">
         <ArrowLeft className="size-4" /> Report #{n}
       </Link>
       {load.kind === "loading" && <div className="mt-6 h-[70vh] animate-pulse rounded-2xl bg-muted/15" aria-label="Loading the CV Studio" />}

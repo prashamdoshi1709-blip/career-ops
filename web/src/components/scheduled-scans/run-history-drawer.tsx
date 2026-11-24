@@ -82,11 +82,12 @@ export function RunHistoryDrawer({
                   </div>
 
                   <p className="mt-2 text-muted leading-relaxed">{run.message || "Execution completed"}</p>
+                  {run.warnings && <p className="mt-1 text-amber-600 dark:text-amber-400 leading-relaxed">Problems in this run: {run.warnings}</p>}
 
                   <div className="mt-2 flex items-center justify-between text-[11px] text-faint border-t border-border/40 pt-1.5">
                     <span>Date: {new Date(run.at).toLocaleDateString()}</span>
                     {typeof run.rolesFound === "number" && (
-                      <span className="font-semibold text-foreground">{run.rolesFound} roles found</span>
+                      <span className="font-semibold text-foreground">{run.rolesFound} new roles</span>
                     )}
                   </div>
                 </div>

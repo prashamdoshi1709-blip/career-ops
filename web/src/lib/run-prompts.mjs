@@ -221,13 +221,24 @@ End with EXACTLY one final line: VERDICT: {5 if now live, else 1}/5 — {what yo
   // The refusal is the mode file's rule (a posting that appears closed stops
   // before Block A). This prompt points at that rule. It does not invent a
   // second one.
+  // Local customisation (2026-11-11): the batch evaluator may pass the job
+  // description itself (saved or pasted by the candidate, or read from an
+  // employer job board's public API) after a marker. Then the posting is NOT
+  // fetched: SEEK and LinkedIn disallow automated access to job pages, and
+  // skipping the fetch also saves turns.
+  const PROVIDED = "\n\n<<provided-job-description>>\n";
+  const providedJd = String(input).includes(PROVIDED) ? String(input).split(PROVIDED)[1] : "";
+  const postingUrl = providedJd ? String(input).split(PROVIDED)[0] : input;
+  const readStep = providedJd
+    ? `   The posting's text is provided below between <job_description> tags (saved by the candidate or read from the employer's job-board API). Do NOT fetch the posting URL. Evaluate this text, archive it verbatim as the report's job description, and mark the report header "Verification: posting text provided; liveness not checked".`
+    : `   Use WebFetch to read the posting (you are headless — Playwright is unavailable), and mark the report header "Verification: unconfirmed (batch mode)".`;
   return `${profileLine}You are running the OFFICIAL career-ops job evaluation, HEADLESS, on the user's own machine. Today is ${today}. Run the REAL career-ops evaluation — do NOT improvise your own scoring.
 
 1. Read ${resolvedLang.evalModeFile} and follow it EXACTLY — EVERY section its report template specifies, in its order, including the Machine Summary. Do not treat any list of sections in THIS prompt as the set to produce; that file is the only source of truth for which sections exist. Ground the fit in THIS person: read cv.md, ${profile} and modes/_profile.md.
 
-   Use WebFetch to read the posting (you are headless — Playwright is unavailable), and mark the report header "Verification: unconfirmed (batch mode)".
+${readStep}
 
-   **If WebFetch does not return the posting itself — a login/consent wall, a partial page shell with no job description, a 404 or expired ad, a paywall, a bot challenge, or a page whose text is not this job — this is the mode file's "posting appears closed" case: STOP BEFORE BLOCK A and do not generate an evaluation, a report or a CV.** That rule is the mode's, not this prompt's; modes/pipeline.md states the same thing for extraction — never treat a login wall or partial shell as a verified JD. Instead, say which URL you fetched and what came back, so the user can paste the job text themselves. A scored report about a login screen looks exactly like a scored report about the job, and a run that reports it could not read the posting is a correct outcome.
+   **If ${providedJd ? "the provided text is not a job description for this posting" : "WebFetch"} does not return the posting itself — a login/consent wall, a partial page shell with no job description, a 404 or expired ad, a paywall, a bot challenge, or a page whose text is not this job — this is the mode file's "posting appears closed" case: STOP BEFORE BLOCK A and do not generate an evaluation, a report or a CV.** That rule is the mode's, not this prompt's; modes/pipeline.md states the same thing for extraction — never treat a login wall or partial shell as a verified JD. Instead, say which URL you fetched and what came back, so the user can paste the job text themselves. A scored report about a login screen looks exactly like a scored report about the job, and a run that reports it could not read the posting is a correct outcome.
 
 ${mem}${unattendedAmbiguityStep}2. ${REPORT_ENVELOPE_INSTRUCTION}
 
@@ -237,5 +248,5 @@ ${mem}${unattendedAmbiguityStep}2. ${REPORT_ENVELOPE_INSTRUCTION}
 After the envelope, end with EXACTLY one final line, nothing after it:
 VERDICT: {score}/5 — {reason in 12 words or fewer}
 
-Posting URL: ${input}`;
+Posting URL: ${postingUrl}${providedJd ? `\n\n<job_description>\n${providedJd.slice(0, 20000)}\n</job_description>` : ""}`;
 }

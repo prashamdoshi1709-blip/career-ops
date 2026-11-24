@@ -122,7 +122,7 @@ function removeRanges(s: string, cuts: [number, number][]): string {
 // the user is looking at.
 function describePage(p: string): string {
   if (p === "/") return "Today / home — overview of the user's pipeline.";
-  if (p === "/pipeline") return "Pipeline — the applications table + the inbox of pending job URLs.";
+  if (p === "/opportunities") return "Pipeline — the applications table + the inbox of pending job URLs.";
   const m = p.match(/^\/pipeline\/([^/]+)$/);
   if (m)
     return `The user is viewing the EVALUATION REPORT for application #${m[1]}. If they say "this offer", "apply", "evaluate it", "draft a cover letter", they mean application #${m[1]} — read reports/${m[1]}-*.md or the matching data/applications.md row and act on THAT one.`;

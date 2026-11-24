@@ -40,8 +40,8 @@ export default function JobsHistory() {
           No workers yet. Hit <span className="text-foreground">Evaluate</span> on an inbox posting to start one.
           <span className="mt-2 block">
             Ran an evaluation from your AI CLI? It shows up in{" "}
-            <Link href="/pipeline?tab=ALL" className="text-foreground underline-offset-2 hover:underline">
-              Pipeline
+            <Link href="/opportunities?tab=ALL" className="text-foreground underline-offset-2 hover:underline">
+              All Job Opportunities
             </Link>
             , not here.
           </span>

@@ -27,6 +27,14 @@ import { mkdtempSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+// 2026-11-23: keep this file's progress logging off stdout. Under parallel
+// load, Node 24's test runner can mis-read a child's stdout that interleaves
+// many raw log lines with its own message stream ("Unable to deserialize
+// cloned data"), failing the file without any assertion failing. stderr
+// (console.warn/error) is not parsed and stays as it is.
+console.log = () => {};
+console.info = () => {};
+
 const tmp = mkdtempSync(join(tmpdir(), 'career-ops-archive-nc-'));
 process.env.CAREER_OPS_ROOT = tmp;
 

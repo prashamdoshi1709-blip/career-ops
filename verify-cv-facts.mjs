@@ -198,6 +198,11 @@ const METRIC_NOUNS = [
 // for the chain — modifiers are alphabetic only — so a wider window still
 // cannot jump across an intervening figure to bind an unrelated noun.
 const MODIFIER_WINDOW = 4;
+// Local fix (2026-11-13): a count never reaches past a preposition. In
+// "framed 3–5 questions for an IT services call" the 5 counts questions; with
+// no stop it skipped "questions for an IT" and reported "5 services". "of" is
+// deliberately NOT a stop, so "20 of the largest clients" is still a claim.
+const WINDOW_STOP_WORDS = ["for", "in", "on", "at", "to", "with", "from", "by", "per", "across", "into", "within", "during", "about", "over", "under", "after", "before", "between", "through", "via"].join("|");
 // The number capture takes a magnitude as part of the number, in both the
 // adjacent-suffix spelling (50k, 1.5M) and the spelled-out one (50 thousand, 1.5
 // million), mirroring what the currency pattern below already does.
@@ -260,7 +265,7 @@ const COUNT_CLAIM_RE = new RegExp(
   // window. `(?:[\p{L}\p{N}]+-)*` lets the counted noun close a hyphenated
   // compound ("318 TryHackMe-Rooms"): German writes the modifier and the noun
   // as one hyphenated token, which a whitespace-only window never saw.
-  String.raw`(?<![A-Za-z]-)\b(\d[\d,.]*(?:[kKmMbB]\b|\s+(?:${SPELLED_MAGNITUDE_ALT})\b)?)\s*\+?\s*(?:\p{L}[\p{L}\p{M}-]*\s+){0,${MODIFIER_WINDOW}}?(?:[\p{L}\p{N}]+-)*(${METRIC_NOUNS.join('|')})(?![\p{L}\p{N}])`,
+  String.raw`(?<![A-Za-z]-)\b(\d[\d,.]*(?:[kKmMbB]\b|\s+(?:${SPELLED_MAGNITUDE_ALT})\b)?)\s*\+?\s*(?:(?!(?:${WINDOW_STOP_WORDS})\s)\p{L}[\p{L}\p{M}-]*\s+){0,${MODIFIER_WINDOW}}?(?:[\p{L}\p{N}]+-)*(${METRIC_NOUNS.join('|')})(?![\p{L}\p{N}])`,
   'giu'
 );
 const NOUN_SYNONYMS = new Map([
@@ -683,6 +688,12 @@ function isLikelyTool(value, sourceNormalized) {
   if (PROSE_FRAGMENTS.has(normalized)) return false;
   if (looksToolShaped(value)) return true;
   if (sourceNormalized != null && sourceContainsFact(sourceNormalized, normalized)) return true;
+  // Local fix (2026-11-13): a lowercase clause that opens with an "-ing" verb
+  // ("assessing revenue", "tracking cash burn") is what the person did with
+  // the tools, not a tool name. Capitalised product names ending in -ing
+  // ("Processing", "Spring Boot" is not -ing) are tool-shaped and were already
+  // kept above, so they stay checked.
+  if (words.length >= 2 && /^[a-z]+ing$/.test(String(value).trim().split(/\s+/)[0])) return false;
   // Every word of the fragment already occurs in the source: this is the
   // document's own vocabulary reworded, not a technology the source never
   // mentions. Tailoring rewords "using" sentences by design, so without this
@@ -776,6 +787,13 @@ function toolFragments(listText) {
   const fragments = [];
   // Text at even indexes; the boundary between two texts at the odd index.
   const parts = listText.split(TOOL_BOUNDARY_RE);
+  // Local fix (2026-11-17): a lowercase "-ing" clause after the list
+  // ("using filings and calls, turning evidence into forecasts, peer
+  // comparisons and written research") ends the plain tool list: lowercase
+  // words after it are what the person produced, not tools. Capitalised,
+  // product-shaped names after it ("into Tableau dashboards") are still read,
+  // so no real tool claim escapes. A one-word item ("logging") is unaffected.
+  let ended = false;
   for (let index = 0; index < parts.length; index += 2) {
     const before = parts[index - 1] ?? '';
     const after = parts[index + 1] ?? '';
@@ -783,6 +801,9 @@ function toolFragments(listText) {
     pieces.forEach((piece, position) => {
       const first = position === 0;
       const last = position === pieces.length - 1;
+      // "using" is itself a tool trigger ("using React, using dbt"), so it never ends the list.
+      if (!ended && piece && position > 0 && /^[a-z]+ing\s+\S/.test(piece) && !/^using\b/i.test(piece)) ended = true;
+      if (ended) { if (piece) for (const name of toolNameRuns(piece, { skipLoneLetter: true })) fragments.push(name); return; }
       if (!piece || (first && TOOL_SENTENCE_END_RE.test(before))) return;
       // Pushed one at a time: spread into push(), hundreds of thousands of
       // names overflow the call stack.
@@ -1891,6 +1912,7 @@ export function diagnoseCoverage(targetText) {
  */
 function allowedMetricSet(sourceText, allowMetrics) {
   const allowed = new Set(metricClaims(sourceText));
+  for (const claim of compoundCountClaims(sourceText)) allowed.add(claim);
   for (const entry of allowMetrics || []) {
     allowed.add(normalizeClaim(entry));
     for (const canonical of metricClaims(String(entry))) allowed.add(canonical);
@@ -1898,10 +1920,31 @@ function allowedMetricSet(sourceText, allowMetrics) {
   return allowed;
 }
 
+// A count written as a compound modifier in the SOURCE ("a ~14-company peer
+// set", "3–4 company models") states the same count as "14 companies" or
+// "3–4 companies", but the counted noun is singular, so metricClaims never read
+// it and a letter restating it in plain words was blocked as invented
+// (2026-11-22). Source side only: it can widen what the source supports, never
+// what a generated document claims. Only nouns metricClaims already counts
+// survive, and only entity nouns (COMPOUND_COUNT_NOUNS).
+// Entity nouns only: "a 5-star rating" or "a 3-page memo" is a measure, not a count of things.
+const COMPOUND_COUNT_NOUNS = /^(company|client|deal|transaction|borrower|fund|bank|country|market|business|firm|entity|project|peer|stock|asset|portfolio|issuer|sector|stakeholder)$/;
+function compoundCountClaims(sourceText) {
+  const out = new Set();
+  const re = /(?<![\p{L}\p{N}.])~?(\d+)(?:\s*[–-]\s*(\d+))?(?:-|\s)(\p{Ll}{3,})(?=\s+\p{L})/gu;
+  for (const m of stripMarkup(String(sourceText ?? '')).matchAll(re)) {
+    if (!COMPOUND_COUNT_NOUNS.test(m[3])) continue;
+    const noun = /y$/.test(m[3]) ? `${m[3].slice(0, -1)}ies` : `${m[3]}s`;
+    for (const n of [m[1], m[2]].filter(Boolean)) for (const c of metricClaims(`${n} ${noun}`)) out.add(c);
+    if (m[2]) for (const c of metricClaims(`${m[1]}–${m[2]} ${noun}`)) out.add(c);
+  }
+  return out;
+}
+
 /** Compare generated metric claims against source text without reading files. */
 export function auditClaims(targetText, sourceText, config = {}) {
   const allowed = allowedMetricSet(sourceText, config.allow_metrics);
-  const invented = [...metricClaims(targetText)].filter(claim => !allowed.has(claim));
+  const invented = [...new Set([...metricClaims(targetText), ...compoundCountClaims(targetText)])].filter(claim => !allowed.has(claim));
   // Hoisted: stripMarkup re-ran the whole markup pass once per configured
   // phrase (CodeRabbit, reviewing #2175). Same result, one pass.
   const targetPlain = stripMarkup(targetText).toLowerCase();
@@ -2053,7 +2096,7 @@ export function verifyFacts(targetText, {
   const allowed = allowedMetricSet(sourceText, config.allow_metrics);
   const targetClaims = metricClaims(targetText);
   const planned = plannedClaims(targetText, planTexts);
-  const invented = [...targetClaims].filter(claim => !allowed.has(claim) && !planned.has(claim));
+  const invented = [...new Set([...targetClaims, ...compoundCountClaims(targetText)])].filter(claim => !allowed.has(claim) && !planned.has(claim));
   const sourceNormalized = normalizeFact(stripMarkup(sourceText));
   const allowedFacts = new Set(config.allow_facts.map(normalizeFact));
   const unsourced = ({ value }) => !sourceContainsFact(sourceNormalized, value) && !allowedFacts.has(value);

@@ -771,25 +771,31 @@ try {
     else fail('workdayTruncated set on a complete fetch');
   }
 
-  // fetch() retry — a 429 that succeeds on a later attempt is transparent to
-  // the caller (no jobs lost, no error surfaced) and respects Retry-After.
+  // 2026-11-23: a 429 is NOT retried inside a board any more. Retrying a
+  // tenant that is rate-limiting this client re-provoked the limit (four
+  // requests per limited board); the error now surfaces at once, carrying its
+  // Retry-After, and the shared circuit (rate-limit-state.mjs) decides when the
+  // cluster is asked again.
   let retrySleepCalls = [];
   let retryAttempts = 0;
   const retryEntry = { name: 'RetryCo', careers_url: 'https://retryco.wd5.myworkdayjobs.com/careers' };
-  const retryJobs = await workday.fetch(retryEntry, mkWorkdayCtx(async () => {
-    retryAttempts++;
-    if (retryAttempts === 1) { const err = new Error('HTTP 429'); err.status = 429; err.retryAfter = '1'; throw err; }
-    return { total: 1, jobPostings: [{ title: 'Recovered Job', externalPath: '/job/board/recovered' }] };
-  }, { sleep: async (ms) => { retrySleepCalls.push(ms); } }));
-  if (retryAttempts === 2 && retryJobs.length === 1 && retryJobs[0].title === 'Recovered Job') {
-    pass('workday.fetch() retries a 429 and recovers transparently');
+  let first429 = null;
+  try {
+    await workday.fetch(retryEntry, mkWorkdayCtx(async () => {
+      retryAttempts++;
+      if (retryAttempts === 1) { const err = new Error('HTTP 429'); err.status = 429; err.retryAfter = '1'; throw err; }
+      return { total: 1, jobPostings: [{ title: 'Recovered Job', externalPath: '/job/board/recovered' }] };
+    }, { sleep: async (ms) => { retrySleepCalls.push(ms); } }));
+  } catch (err) { first429 = err; }
+  if (retryAttempts === 1 && first429?.status === 429 && retrySleepCalls.length === 0) {
+    pass('workday.fetch() does not retry a first-page 429: one request, no wait, the error surfaces');
   } else {
-    fail(`workday 429 retry: attempts=${retryAttempts}, jobs=${JSON.stringify(retryJobs)}`);
+    fail(`workday 429 no-retry: attempts=${retryAttempts}, sleeps=${JSON.stringify(retrySleepCalls)}, err=${first429?.status}`);
   }
-  if (retrySleepCalls[0] === 1000) {
-    pass('workday.fetch() honors Retry-After header for backoff delay');
+  if (first429?.retryAfter === '1') {
+    pass('workday.fetch() passes the 429 Retry-After on to the caller (for the circuit cooldown)');
   } else {
-    fail(`workday retry-after: expected first backoff delay 1000ms, got ${JSON.stringify(retrySleepCalls)}`);
+    fail(`workday 429 Retry-After not carried: ${JSON.stringify(first429?.retryAfter)}`);
   }
 
   // fetch() retry — a hostile or misconfigured Retry-After (e.g. 86400s = a
@@ -801,7 +807,9 @@ try {
   const hostileRetryEntry = { name: 'HostileRetryCo', careers_url: 'https://hostileretryco.wd5.myworkdayjobs.com/careers' };
   await workday.fetch(hostileRetryEntry, mkWorkdayCtx(async () => {
     hostileRetryAttempts++;
-    if (hostileRetryAttempts === 1) { const err = new Error('HTTP 429'); err.status = 429; err.retryAfter = '86400'; throw err; }
+    // 503 rather than 429 since 2026-11-23: 5xx is still retried, and still
+    // honours a (clamped) Retry-After.
+    if (hostileRetryAttempts === 1) { const err = new Error('HTTP 503'); err.status = 503; err.retryAfter = '86400'; throw err; }
     return { total: 0, jobPostings: [] };
   }, { sleep: async (ms) => { hostileRetrySleepCalls.push(ms); } }));
   if (hostileRetrySleepCalls[0] === 32_000) {

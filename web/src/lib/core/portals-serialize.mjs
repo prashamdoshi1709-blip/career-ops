@@ -25,7 +25,7 @@ function block(key, items) {
  * block_hard included, or a config that hard-blocks and nothing else would write
  * no location_filter at all and the scan would honor none of it (#3102).
  *
- * @param {{positive:string[], negative:string[], allow:string[], block:string[], alwaysAllow:string[], blockHard:string[]}} f
+ * @param {{positive:string[], negative:string[], allow:string[], block:string[], alwaysAllow:string[], blockHard:string[], negativeExempt?:string[]}} f
  * @returns {string}
  */
 export function serializePortals(f) {
@@ -34,6 +34,8 @@ export function serializePortals(f) {
     out += "title_filter:\n";
     out += block("positive", f.positive);
     out += block("negative", f.negative);
+    // 2026-11-22: entry-level titles exempt from negative vetoes (portals.yml).
+    if (Array.isArray(f.negativeExempt) && f.negativeExempt.length) out += block("negative_exempt_phrases", f.negativeExempt);
   }
   if (f.blockHard.length || f.allow.length || f.block.length || f.alwaysAllow.length) {
     out += "location_filter:\n";

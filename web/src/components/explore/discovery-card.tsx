@@ -9,6 +9,8 @@ import { CHINA_SOURCES, EMPLOYER_LABEL } from "@/lib/employer-preset.mjs";
 import { useJobs } from "@/components/jobs/job-store";
 import { useExplore } from "./explore-provider";
 
+const PORTAL_GROUP_LABEL: Record<string, string> = { seek: "SEEK", recruiters: "Specialist recruiter", employers: "Employer site" };
+
 function freshness(postedAt: string): string {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(postedAt)) return "";
   const days = Math.max(0, Math.round((Date.now() - new Date(postedAt + "T00:00:00Z").getTime()) / 86_400_000));
@@ -88,8 +90,9 @@ export function DiscoveryCard({ offer, inPipeline, evaluatedN }: { offer: Discov
       </div>
 
       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-        <span className="rounded border border-border px-1.5 py-0.5 font-medium text-muted">{ATS_LABEL[offer.ats as AtsSource] ?? EMPLOYER_LABEL[offer.ats as keyof typeof EMPLOYER_LABEL] ?? offer.ats}</span>
-        {(fresh || employer) && <span className="text-faint">{fresh || "Posting date unknown"}</span>}
+        <span className="rounded border border-border px-1.5 py-0.5 font-medium text-muted">{ATS_LABEL[offer.ats as AtsSource] ?? EMPLOYER_LABEL[offer.ats as keyof typeof EMPLOYER_LABEL] ?? PORTAL_GROUP_LABEL[offer.ats] ?? offer.ats}</span>
+        {/* 2026-11-23: an undated job says so (never "today"); the date is unknown, not missing data to fill in. */}
+        <span className={fresh ? "text-faint" : "rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-amber-700 dark:text-amber-300"}>{fresh || "Posting date unknown"}</span>
         {unverified && (
           <span
             className="inline-flex items-center gap-1 rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 font-medium text-amber-600 dark:text-amber-300"
@@ -128,7 +131,7 @@ export function DiscoveryCard({ offer, inPipeline, evaluatedN }: { offer: Discov
       <div className="mt-0.5">
         {evaluatedN || doneEval ? (
           <a
-            href={evaluatedN ? `/pipeline/${evaluatedN}` : job ? `/jobs/${job.id}` : "/pipeline"}
+            href={evaluatedN ? `/opportunities/${evaluatedN}` : job ? `/jobs/${job.id}` : "/opportunities"}
             className="inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-brand-soft px-2.5 py-2 text-xs font-medium text-brand max-sm:min-h-[44px]"
           >
             <Check className="size-3.5" /> Evaluated · view report

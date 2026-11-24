@@ -16,5 +16,5 @@ export function inboxScoreTarget(scored) {
   if (scored.running || !hasReport) {
     return { evaluated: true, href: `/jobs/${scored.jobId}`, showScore };
   }
-  return { evaluated: true, href: `/pipeline/${scored.reportN}`, showScore };
+  return { evaluated: true, href: `/opportunities/${scored.reportN}`, showScore };
 }

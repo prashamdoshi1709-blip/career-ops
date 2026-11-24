@@ -351,12 +351,35 @@ export function buildDomainFilter(domainKeywords) {
  * @param {{positive?: unknown, negative?: unknown}} [titleFilter]
  * @returns {(title: string) => boolean}
  */
+/**
+ * `title_filter.negative_exempt_phrases` (2026-11-22): phrases blanked out of a
+ * title before the negative list is tested, so "Associate Relationship Manager"
+ * is not vetoed by `word:Manager` while "Associate Relationship Manager, Vice
+ * President" still is (the VP veto sees the rest of the title). Positives are
+ * tested on the full title as before. Absent or empty: no change.
+ *
+ * @param {{negative_exempt_phrases?: unknown}} [titleFilter]
+ * @returns {string[]} folded phrases
+ */
+export function negativeExemptPhrases(titleFilter) {
+  const raw = titleFilter?.negative_exempt_phrases;
+  return (Array.isArray(raw) ? raw : []).filter((k) => typeof k === 'string' && k.trim()).map((k) => foldTitle(k).trim());
+}
+
+/** The folded title with each exempt phrase replaced by a space. */
+export function withoutExemptPhrases(lowerTitle, phrases) {
+  let t = lowerTitle;
+  for (const p of phrases) t = t.split(p).join(' ');
+  return t;
+}
+
 export function buildTitleFilter(titleFilter) {
   // AND-groups are a POSITIVE-side feature only. On the negative side an entry
   // is a veto, and " + " there would read as "reject when both appear", which
   // is a different and much easier thing to write as two entries.
   const positive = normalizeKeywords(titleFilter?.positive, compilePositiveKeyword);
   const negative = normalizeKeywords(titleFilter?.negative, compileKeyword);
+  const exempt = negativeExemptPhrases(titleFilter);
 
   return (title) => {
     // String(), not `title || ''`: openrouter-runner used String(title ?? '')
@@ -369,7 +392,7 @@ export function buildTitleFilter(titleFilter) {
     // a negative-only title_filter is a legitimate config that rejects a few
     // roles and keeps the rest.
     const hasPositive = positive.length === 0 || positive.some(m => m(lower));
-    const hasNegative = negative.some(m => m(lower));
+    const hasNegative = negative.some(m => m(withoutExemptPhrases(lower, exempt)));
     return hasPositive && !hasNegative;
   };
 }

@@ -39,6 +39,7 @@
  *   node scan-ats-full.mjs --ats greenhouse,workday  # subset of sources
  *   node scan-ats-full.mjs --history-seeds --ats successfactors # scan history-derived boards
  *   node scan-ats-full.mjs --limit 200          # max companies per ATS (default: all)
+  node scan-ats-full.mjs --rotate --budget-seconds 600  # progressive sweep: continue where the last run stopped
  *   node scan-ats-full.mjs --dry-run            # preview without writing files
  *   node scan-ats-full.mjs --liveness           # Playwright-verify matches before writing
  *   node scan-ats-full.mjs --include-blacklisted # audit: let data/blacklist.md matches through, annotated
@@ -48,20 +49,21 @@
  *   node scan-ats-full.mjs --help               # print this usage block and exit
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, unlinkSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, unlinkSync, appendFileSync } from 'fs';
 import { createHash } from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { loadYaml } from './lib/yaml-document.mjs';
 import { renameSyncWithRetry } from './tracker-utils.mjs';
 
-import { makeHttpCtx, fetchJson, fetchTextHead } from './providers/_http.mjs';
+import { makeHttpCtx, fetchJson, fetchTextHead, parseRetryAfterMs } from './providers/_http.mjs';
 import { withConnectionScope, withAbortScope } from './providers/_connection-scope.mjs';
 import { isResolverFailure, dnsPacingStats } from './providers/_dns-cache.mjs';
 import greenhouse from './providers/greenhouse.mjs';
 import lever from './providers/lever.mjs';
 import ashby from './providers/ashby.mjs';
 import workday, { WORKDAY_TRUNCATED_REASON } from './providers/workday.mjs';
+import { openRateLimitBook } from './rate-limit-state.mjs';
 import icims from './providers/icims.mjs';
 import bamboohr from './providers/bamboohr.mjs';
 import { buildTitleFilter, buildTitleFilterOverrides, buildTitleFilterWithOverrides, buildLocationFilter, buildContentFilter, matchedTitleKeywords, loadSeenUrls, normalizeUrlForDedup, appendToPipeline, appendToScanHistory, findBlacklistEntry, loadBlacklist, parseSinceDays, PORTALS_PATH, PIPELINE_PATH, SCAN_HISTORY_PATH } from './scan.mjs';
@@ -160,6 +162,7 @@ function validCheckpointCurrent(cur) {
 export function checkpointCompatible(cp, opts) {
   return Boolean(cp)
     && !opts.shuffle
+    && !opts.rotate
     && JSON.stringify(cp.ats) === JSON.stringify(opts.ats)
     && (cp.limit ?? null) === (opts.limit === Infinity ? null : opts.limit)
     && cp.includeUndated === opts.includeUndated;
@@ -324,6 +327,15 @@ export const SOURCES = {
   },
   workday: {
     provider: workday,
+    // 2026-11-22: tenants share a few wdN hosts behind one rate limiter; at the
+    // default 20 a 500-company sample drew HTTP 429 on 379 boards; at 4 about
+    // half still did, so 2, plus the adaptive throttle in the board loop.
+    // 2026-11-23: one board at a time with 2.5-4s between boards. The rate
+    // limit is shared by every tenant on a wdN cluster, and the tracked
+    // employers (scan.mjs) draw on the same allowance, so the directory sweep
+    // must stay slow and stop when the cluster's circuit opens.
+    concurrency: 1,
+    paceMs: 2_500,
     dataset: `${DATASET_BASE}/workday_companies.json`,
     // Dataset entries are "tenant|instance|site" triples.
     toEntry: (line) => {
@@ -366,12 +378,12 @@ export const SOURCES = {
 const KNOWN_FLAGS = [
   '--since', '--limit', '--ats', '--seeds', '--history-seeds', '--probe-unknown-hosts', '--dry-run', '--liveness',
   '--verbose', '--md-out', '--json', '--include-undated', '--include-blacklisted',
-  '--shuffle', '--resume', '--help', '-h',
+  '--shuffle', '--rotate', '--budget-seconds', '--resume', '--help', '-h',
 ];
 
 // Flags that consume the next argv token as a value (space-separated form —
 // the `--flag=value` form is self-contained and never needs this).
-const VALUE_FLAGS = ['--since', '--limit', '--ats', '--seeds', '--md-out'];
+const VALUE_FLAGS = ['--since', '--limit', '--ats', '--seeds', '--md-out', '--budget-seconds'];
 
 const USAGE = `Usage:
   node scan-ats-full.mjs                      # scan all ATS directories, last 3 days
@@ -469,6 +481,11 @@ export function parseArgs(argv) {
     includeUndated: args.includes('--include-undated'),
     includeBlacklisted: args.includes('--include-blacklisted'),
     shuffle: args.includes('--shuffle'),
+    rotate: args.includes('--rotate'),
+    // Per-source time budget (2026-11-22): stop claiming new boards once it
+    // passes, finish the ones in flight, and report normally. With --rotate
+    // the next run continues from the companies not yet checked.
+    budgetSeconds: Number(valueOf('--budget-seconds')) > 0 ? Number(valueOf('--budget-seconds')) : 0,
     resume: args.includes('--resume'),
   };
 }
@@ -756,6 +773,59 @@ export function sampleCompanies(list, limit, shuffle = false) {
   return copy.slice(0, limit);
 }
 
+// ── Coverage rotation (2026-11-22) ───────────────────────────────────
+// --rotate replaces a random sample with a rotation across the whole
+// directory: companies never scanned come first (finance-named ones ahead of
+// the rest), then the least recently scanned. data/explore-coverage.json keeps
+// the last scan date per company, so repeated capped runs work through all
+// 27,000+ companies instead of drawing overlapping random samples.
+export const COVERAGE_PATH = path.join(DATA_ROOT, 'data/explore-coverage.json');
+const FINANCE_NAME = /bank|capital|invest|advis|partners|securities|asset|wealth|financ|equity|fund|credit|lending|insur|super|treasury|markets|holdings|ventures|group/i;
+export const companyKey = (x) => (typeof x === 'string' ? x : String(x?.slug ?? x?.token ?? x?.name ?? JSON.stringify(x)));
+export function readCoverage(file = COVERAGE_PATH) {
+  try { const c = JSON.parse(readFileSync(file, 'utf-8')); return c && typeof c.sources === 'object' ? c : { version: 1, sources: {} }; } catch { return { version: 1, sources: {} }; }
+}
+export function writeCoverage(cov, file = COVERAGE_PATH) {
+  mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  writeFileSync(tmp, JSON.stringify(cov), 'utf-8');
+  renameSyncWithRetry(tmp, file);
+}
+/** Pure: the next `limit` companies in rotation order. */
+// Order: (1) employers seen posting Australian roles, not checked in the last
+// `recheckHours` (they are where new matches appear); (2) never checked,
+// finance-named first; (3) everyone else, least recently checked first.
+export const AU_NAME = /(^|[|_.\-\s])(au|aus|anz|apac|oceania|nz)([|_.\-\s]|$)|australia|sydney|melbourne/i;
+export function rotateCompanies(list, limit, seen = {}, { au = {}, now = Date.now(), recheckHours = 6 } = {}) {
+  const ranked = list.map((x, i) => {
+    const k = companyKey(x);
+    const at = seen[k] ? Date.parse(seen[k]) || 0 : 0;
+    const tier = au[k] && now - at > recheckHours * 3_600_000 ? 0 : !at ? 1 : 2;
+    // 2026-11-23: within the never-checked tier, Australian-named finance
+    // boards first, then Australian-named, then finance-named.
+    const auName = AU_NAME.test(k);
+    const finName = FINANCE_NAME.test(k);
+    return { x, i, tier, fin: auName && finName ? 0 : auName ? 1 : finName ? 2 : 3, at };
+  });
+  ranked.sort((a, b) => a.tier - b.tier || (a.tier === 1 ? a.fin - b.fin : a.at - b.at) || a.i - b.i);
+  return ranked.slice(0, limit).map((r) => r.x);
+}
+/** Coverage counts for one source. */
+export function coverageSummary(list, seen = {}, now = Date.now(), days = 30, au = {}, attempts = {}) {
+  let ever = 0, recent = 0, auCount = 0, limited = 0;
+  for (const x of list) { const k = companyKey(x); if (au[k]) auCount++; const at = seen[k]; if (!at) { if (attempts[k]) limited++; continue; } ever++; if (now - Date.parse(at) <= days * 86_400_000) recent++; }
+  // notYetScanned keeps its meaning (never successfully checked); of those,
+  // rateLimitedPending were tried and answered 429 or were held back by an
+  // open circuit, and neverAttempted were never asked at all.
+  return { available: list.length, coveredEver: ever, [`covered${days}d`]: recent, notYetScanned: list.length - ever, rateLimitedPending: limited, neverAttempted: list.length - ever - limited, australianEmployers: auCount };
+}
+
+export const RUNS_LOG_PATH = path.join(DATA_ROOT, 'data/explore-runs.jsonl');
+/** One JSON line per rotated run: what was checked and why postings fell out. */
+export function appendRunLog(row, file = RUNS_LOG_PATH) {
+  try { mkdirSync(path.dirname(file), { recursive: true }); appendFileSync(file, `${JSON.stringify(row)}\n`, 'utf-8'); } catch (e) { console.error(`run log not written: ${e.message}`); }
+}
+
 /** One stderr JSON line per kept offer in `--json` mode so Explore can paint
  *  cards while the walk continues. Stdout stays the single summary object (#1199). */
 export function formatLiveOfferLine(job, source) {
@@ -990,6 +1060,30 @@ export async function runHistorySeedScan(seeds, providers, opts, ctx, processJob
 // timeouts in _http.mjs, an unforeseen hang (DNS, a provider bug) must cost
 // one company, not freeze a worker slot for the rest of a 12k-company sweep.
 const COMPANY_TIMEOUT_MS = 5 * 60_000;
+// 2026-11-23: with --budget-seconds, a board still in flight when the budget
+// ends gets this much grace before its watchdog aborts it (it was the full
+// COMPANY_TIMEOUT_MS: the 2026-11-22 three-source sweep ran 1,164s against a
+// 900s budget). An aborted board is not marked checked; the next run retries it.
+export const BUDGET_GRACE_MS = 30_000;
+/** Pure: watchdog for one board, given the source's budget end (null = no budget). */
+export function boardTimeoutMs(budgetEndsAt, now = Date.now()) {
+  if (budgetEndsAt == null) return COMPANY_TIMEOUT_MS;
+  return Math.min(COMPANY_TIMEOUT_MS, Math.max(BUDGET_GRACE_MS, budgetEndsAt + BUDGET_GRACE_MS - now));
+}
+/**
+ * Time the process spent frozen (macOS sleep): a 5s heartbeat that arrives
+ * much later than due. Monotonic clocks do not help here — on this machine
+ * process.hrtime keeps counting through sleep — so the gap itself is the
+ * evidence. 2026-11-23: a Workday sweep ran 935s for 34s of work because the
+ * Mac slept 901s in the middle of it; the run log now says so.
+ */
+export function startSleepMeter({ tickMs = 5_000, thresholdMs = 30_000, now = () => Date.now() } = {}) {
+  let last = now();
+  let sleptMs = 0;
+  const timer = setInterval(() => { const t = now(); const gap = t - last; if (gap > thresholdMs) sleptMs += gap - tickMs; last = t; }, tickMs);
+  timer.unref?.();
+  return { sleptMs: () => sleptMs, stop: () => clearInterval(timer) };
+}
 
 // Run one board's unit of work. For a source that gives every tenant its own
 // hostname (workday, icims, bamboohr), the board gets a private connection
@@ -1170,6 +1264,12 @@ async function main() {
   const titleFilterOverrides = buildTitleFilterOverrides(config?.title_filter_overrides);
   const titleFilter = buildTitleFilterWithOverrides(fullTitleFilterConfig, titleFilterOverrides);
   const locationFilter = buildLocationFilter(config?.location_filter);
+  // 2026-11-24: a board is marked "Australian employer" (rechecked first by
+  // the rotation) only when this run's location filter actually restricts
+  // places. A run with no allow list matches every location, so it says
+  // nothing about where a board hires; two such Explore runs had marked ~4,800
+  // non-Australian boards and would have spent every sweep re-checking them.
+  const locationRestricted = ['allow', 'always_allow'].some((k) => Array.isArray(config?.location_filter?.[k]) && config.location_filter[k].length > 0);
   // Same content_filter (incl. by_title_keyword scoping) scan.mjs applies —
   // see #1846. Built once here from the same portals.yml config.
   const contentFilter = buildContentFilter(config?.content_filter);
@@ -1308,6 +1408,22 @@ async function main() {
   let domainGatedBoards = cc.domainGatedBoards || 0;
   let domainGatedPostings = cc.domainGatedPostings || 0;
   const datasetStatus = {};
+  // Rejection funnel (2026-11-22): why postings did not reach the results.
+  // postingsListedOnly counts postings on boards whose cheap listing had no
+  // title match, so their bodies were never fetched.
+  let budgetStopped = false;
+  const funnel = { rateLimited: 0, failed: 0, boardsReached: 0, boardsWithPostings: 0, boardsNoTitleMatch: 0, postingsListedOnly: 0, postingsSeen: 0, rejectedDate: 0, rejectedUndated: 0, rejectedTitle: 0, rejectedLocation: 0, rejectedContent: 0, duplicates: 0, matched: 0 };
+  const coverage = opts.rotate ? readCoverage() : { version: 1, sources: {} };
+  // 2026-11-23: per-source figures for the dashboard (the funnel above is the
+  // whole run), and the shared rate-limit circuits (rate-limit-state.mjs).
+  const funnelBySource = {};
+  const sleepMeter = startSleepMeter();
+  const rateBook = openRateLimitBook(path.join(DATA_ROOT, 'data/rate-limit-state.json'));
+  const coverageLists = {};
+  const retiredCounts = {};
+  // Parallel Explore children each scan one source: re-read and replace only this run's sources.
+  const saveCoverage = () => { if (!opts.rotate) return; try { const latest = readCoverage(); latest.au ??= {}; latest.attempts ??= {}; latest.directory ??= {}; for (const n of Object.keys(coverageLists)) { latest.sources[n] = coverage.sources[n]; latest.au[n] = coverage.au?.[n] ?? {}; latest.attempts[n] = coverage.attempts?.[n] ?? {}; if (coverage.directory?.[n]) latest.directory[n] = coverage.directory[n]; latest.lastRun ??= {}; latest.lastRun[n] = new Date().toISOString(); } writeCoverage(latest); } catch (e) { console.error(`coverage not saved: ${e.message}`); } };
+  const coverageReport = () => opts.rotate ? Object.fromEntries(Object.entries(coverageLists).map(([n, l]) => [n, { ...coverageSummary(l, coverage.sources[n] ?? {}, Date.now(), 30, coverage.au?.[n] ?? {}, coverage.attempts?.[n] ?? {}), retiredBoards: retiredCounts[n] ?? 0, unusableEntries: coverage.directory?.[n]?.unusable ?? 0 }])) : null;
 
   // Graceful stop for the web layer: it SIGTERMs us when its scan budget elapses
   // (see web/src/lib/core/scan-timeout.mjs). A full sweep only prints its result
@@ -1325,13 +1441,26 @@ async function main() {
   let curDeadSkipped = 0;
   if (opts.json) {
     let flushed = false;
-    process.on('SIGTERM', () => {
+    process.on('SIGTERM', async () => {
       if (flushed) return;
       flushed = true;
       try {
-        const partial = filterBlacklistedOffers(newOffers, blacklist, {
+        const kept = filterBlacklistedOffers(newOffers, blacklist, {
           includeBlacklisted: opts.includeBlacklisted,
-        }).offers.map((o) => ({
+        }).offers;
+        // 2026-11-23: a stopped sweep (not a dry run) saves the matches it has
+        // already found before it exits. Coverage below marks their boards
+        // checked, so a match left only in this printout would not be looked
+        // for again until the rotation came back round. The scheduler stops a
+        // sweep at 25 minutes, and that clock runs on while the Mac sleeps.
+        if (!opts.dryRun && kept.length) {
+          try {
+            if (!existsSync(PIPELINE_PATH)) { mkdirSync(path.dirname(PIPELINE_PATH), { recursive: true }); writeFileSync(PIPELINE_PATH, '# Pipeline\n\n## Pendientes\n', 'utf-8'); }
+            await appendToPipeline(kept);
+            await appendToScanHistory(kept, date);
+          } catch (e) { console.error(`stopped early: matches not saved: ${e.message}`); }
+        }
+        const partial = kept.map((o) => ({
           company: o.company,
           title: o.title,
           url: o.url,
@@ -1344,6 +1473,8 @@ async function main() {
           date,
           sources: opts.ats,
           stoppedEarly: true,
+          funnel,
+          coverage: (() => { saveCoverage(); const c = coverageReport(); appendRunLog({ at: new Date().toISOString(), mode: opts.dryRun ? 'explore' : 'sweep', stoppedEarly: true, sources: opts.ats, funnel, coverage: c }); return c; })(),
           companiesAvailable: totalCompaniesAvailable,
           companiesScanned: Math.max(0, totalCompaniesScanned - (curEntries - curDone) - curDeadSkipped),
           capHit,
@@ -1388,11 +1519,12 @@ async function main() {
     for (const job of jobs) {
       if (!shouldContinue()) return;
       if (!job.url || !job.title) continue;
+      funnel.postingsSeen++;
       // Confirmed-stale postings are always dropped. Undated postings are
       // dropped by default (a reverse scan targets *fresh* roles) but
       // COUNTED so callers see the gap; --include-undated keeps them, marked.
       let dateClass = classifyPostingDate(job, cutoff);
-      if (dateClass === 'stale') continue;
+      if (dateClass === 'stale') { funnel.rejectedDate++; continue; }
       // Providers whose list pages carry no date (icims) get one shot at dating
       // the posting from its detail page — but only after the cheap title and
       // location filters pass, so a 10k-tenant sweep never pays a detail-page
@@ -1411,16 +1543,25 @@ async function main() {
         if (!shouldContinue()) return;
         dateClass = classifyPostingDate(job, cutoff);
       }
-      if (dateClass === 'stale') continue;
-      if (dateClass === 'undated' && !opts.includeUndated) { droppedNoDate++; continue; }
-      if (!titleFilter(job.title, companySlug)) continue;
+      if (dateClass === 'stale') { funnel.rejectedDate++; continue; }
+      // 2026-11-23: an undated posting is no longer dropped before anyone
+      // looks at it. It goes through the title, location and content checks
+      // like any other; a relevant one is kept with dateStatus 'unknown' (no
+      // date is invented) and counted as undatedKept, an irrelevant one is
+      // counted under the filter that rejected it. Before, every undated
+      // posting was dropped here, relevant or not ("rejected for a missing
+      // date: 14").
+      const undated = dateClass === 'undated' && !opts.includeUndated;
+      if (!titleFilter(job.title, companySlug)) { funnel.rejectedTitle++; continue; }
       // job.url is passed so the location filter can fall back to the URL's own
       // location segment when the provider reports a rolled-up "N Locations" string;
       // job.title so a title-stated remote role survives a city-only location.
-      if (!locationFilter(job.location, job.url, job.title)) continue;
-      if (!contentFilter(job.description, matchedTitleKeywords(job.title, fullTitleFilterConfig))) { droppedContent++; continue; }
+      if (!locationFilter(job.location, job.url, job.title)) { funnel.rejectedLocation++; continue; }
+      if (!contentFilter(job.description, matchedTitleKeywords(job.title, fullTitleFilterConfig))) { droppedContent++; funnel.rejectedContent++; continue; }
       const dedupToken = dedupTokenFor(job, provider);
-      if (seenUrls.has(dedupToken)) continue;
+      if (seenUrls.has(dedupToken)) { funnel.duplicates++; continue; }
+      funnel.matched++;
+      if (undated) funnel.undatedKept = (funnel.undatedKept ?? 0) + 1;
       seenUrls.add(dedupToken); // intra-scan dedup
       keepAndMaybeEmit(job, `${sourceName}-full`, newOffers, blacklist, opts);
     }
@@ -1432,6 +1573,9 @@ async function main() {
 
   for (const name of opts.ats.filter((ats) => SOURCES[ats])) {
     const source = SOURCES[name];
+    const funnelAtStart = { ...funnel };
+    const offersAtStart = newOffers.length;
+    const sourceStats = { boardsAttempted: 0, deferredRateLimit: 0, successfulResponses: 0, startedAt: new Date().toISOString() };
     // Stats are accumulated BEFORE the completed-source skip: on --resume a
     // source finished before the checkpoint was written still contributed its
     // companies to the sweep, so it must still count toward the availability /
@@ -1445,7 +1589,23 @@ async function main() {
       continue;
     }
     const datasetHash = datasetFingerprint(list);
-    const entriesAll = sampleCompanies(list, opts.limit, opts.shuffle).map(source.toEntry).filter(Boolean);
+    // Rotation (2026-11-22): retired boards (repeated 404s, dead-boards.tsv) are
+    // left out of the pick so a batch is spent on live companies, and a company
+    // is marked covered only after its board was actually checked (below).
+    const retired = opts.rotate ? loadDeadBoards(DEAD_BOARDS_PATH) : null;
+    const candidates = opts.rotate ? list.filter((x) => { const e = source.toEntry(x); return e && !shouldSkipDeadBoard(retired, name, boardKey(e)); }) : list;
+    const picked = opts.rotate ? rotateCompanies(candidates, opts.limit, coverage.sources[name] ?? {}, { au: coverage.au?.[name] ?? {} }) : sampleCompanies(list, opts.limit, opts.shuffle);
+    if (opts.rotate) {
+      coverage.sources[name] ??= {}; (coverage.au ??= {})[name] ??= {}; (coverage.attempts ??= {})[name] ??= {}; coverageLists[name] = list;
+      // Unusable = the directory row cannot name a board (e.g. Workday rows
+      // whose tenant is a cluster name like "wd102"); retired = repeated 404s.
+      const unusable = list.filter((x) => !source.toEntry(x)).length;
+      retiredCounts[name] = list.length - candidates.length - unusable;
+      (coverage.directory ??= {})[name] = { listed: list.length, unusable, retired: retiredCounts[name], usable: list.length - unusable };
+    }
+    const pairs = picked.map((x) => [source.toEntry(x), companyKey(x)]).filter((p) => p[0]);
+    const rawKeyOf = new Map(pairs);
+    const entriesAll = pairs.map((p) => p[0]);
 
     let startAt = 0;
     if (checkpoint && checkpoint.current?.name === name) {
@@ -1467,6 +1627,27 @@ async function main() {
     let errors = 0;
     let deadBoardsSkipped = 0;
     const deadBoards = loadDeadBoards(DEAD_BOARDS_PATH);
+    const sourceStartedAt = Date.now();
+    const budgetEndsAt = opts.budgetSeconds > 0 ? sourceStartedAt + opts.budgetSeconds * 1000 : null;
+    const sleptAtStart = sleepMeter.sleptMs();
+    const budgetExpired = () => opts.budgetSeconds > 0 && Date.now() - sourceStartedAt > opts.budgetSeconds * 1000;
+    // Adaptive throttle (2026-11-22): when more than a fifth of the last 20
+    // boards on this source answered HTTP 429, wait before claiming the next
+    // one (5s, scaled by the 429 share, up to 20s). Never a retry storm.
+    const recentOutcomes = [];
+    const noteOutcome = (limited) => { recentOutcomes.push(limited ? 1 : 0); if (recentOutcomes.length > 20) recentOutcomes.shift(); };
+    const throttle = async () => {
+      if (recentOutcomes.length < 5) return;
+      const share = recentOutcomes.reduce((a, b) => a + b, 0) / recentOutcomes.length;
+      if (share > 0.2) { funnel.throttledWaits = (funnel.throttledWaits ?? 0) + 1; await new Promise((r) => setTimeout(r, Math.min(20_000, Math.round(5_000 + 15_000 * share)))); }
+    };
+    // successfulResponses counts each board once, and only when it answered
+    // (a 404 is checked, not successful; a listing pass then a full fetch is
+    // one board). 2026-11-23: it had counted both, so "OK" exceeded attempts.
+    const answered = new Set();
+    const markChecked = (entry, ok = true) => { if (ok && !answered.has(entry)) { answered.add(entry); sourceStats.successfulResponses++; } if (opts.rotate) { const k = rawKeyOf.get(entry); if (k) { coverage.sources[name][k] = new Date().toISOString(); delete coverage.attempts[name][k]; } } };
+    const markLimited = (entry, outcome) => { if (opts.rotate) { const k = rawKeyOf.get(entry); if (k && !coverage.sources[name][k]) coverage.attempts[name][k] = { at: new Date().toISOString(), outcome }; } };
+    const markAustralian = (entry, jobs) => { if (!opts.rotate || !locationRestricted || !Array.isArray(jobs)) return; const k = rawKeyOf.get(entry); if (k && jobs.some((j) => j && locationFilter(j.location, j.url, j.title))) coverage.au[name][k] = new Date().toISOString(); };
     let consecutiveResolverFailures = 0;
     let resolverOutage = false;
     // The board whose failure tripped the breaker. `name` is only the ATS
@@ -1499,17 +1680,30 @@ async function main() {
         deadBoardsSkipped++;
         return;
       }
+      // Shared circuit: a cluster that is rate-limiting us gets no request
+      // until its cooldown passes (then one probe). Not a miss, not checked.
+      const circuit = rateBook.check(entry.careers_url);
+      if (circuit && !circuit.allow) { sourceStats.deferredRateLimit++; funnel.deferredRateLimit = (funnel.deferredRateLimit ?? 0) + 1; markLimited(entry, 'deferred'); return; }
+      await throttle();
+      if (source.paceMs) await new Promise((r) => setTimeout(r, source.paceMs + Math.round(Math.random() * 1_500)));
+      if (budgetExpired()) { budgetStopped = true; return; }
+      sourceStats.boardsAttempted++;
       try {
         // The whole per-company unit — fetch AND processJobs (which may issue
         // per-job detail-page requests via provider.enrichDate) — runs inside
         // one watchdog, so enrichment latency can't blow past COMPANY_TIMEOUT_MS.
-        await boardScope(source, `${name}/${entry.name}`, COMPANY_TIMEOUT_MS, async () => {
+        await boardScope(source, `${name}/${entry.name}`, boardTimeoutMs(budgetEndsAt), async () => {
           // Most boards in a public directory hold nothing the title filter
           // wants; where the provider can list a board cheaply, find that out
           // before downloading every posting body.
           if (typeof source.provider.fetchListing === 'function') {
             const listing = await source.provider.fetchListing(entry, ctx);
+            markChecked(entry); markAustralian(entry, listing); rateBook.record(entry.careers_url, 'ok');
+            funnel.boardsReached++;
+            if (Array.isArray(listing) && listing.length) funnel.boardsWithPostings++;
             if (!listingMayMatch(listing, { cutoff, titleFilter, companySlug: entry.name })) {
+              funnel.boardsNoTitleMatch++;
+              if (Array.isArray(listing)) funnel.postingsListedOnly += listing.length;
               if (!opts.includeUndated) droppedNoDate += undatedInListing(listing, cutoff);
               recordBoardResult(deadBoards, name, deadBoard, 200);
               consecutiveResolverFailures = 0;
@@ -1517,6 +1711,8 @@ async function main() {
             }
           }
           const jobs = await source.provider.fetch(entry, ctx);
+          markChecked(entry); markAustralian(entry, jobs); noteOutcome(false); rateBook.record(entry.careers_url, 'ok');
+          if (typeof source.provider.fetchListing !== 'function') { funnel.boardsReached++; if (jobs.length) funnel.boardsWithPostings++; }
           recordBoardResult(deadBoards, name, deadBoard, 200);
           consecutiveResolverFailures = 0;
           // Queued BEFORE the gate, deliberately: a board the gate cannot yet
@@ -1558,6 +1754,12 @@ async function main() {
         // Mostly defunct boards in the public dataset — expected noise, so the
         // default stays quiet; --verbose surfaces per-board failures.
         errors++;
+        // A rate-limited board was not checked: it stays unmarked and comes back
+        // in the next rotation. A 404 is a checked (missing) board.
+        const limited = err?.status === 429 || /HTTP 429/.test(String(err?.message));
+        noteOutcome(limited);
+        if (limited) { funnel.rateLimited++; markLimited(entry, 'rate_limited'); rateBook.record(entry.careers_url, 'limited', parseRetryAfterMs(err?.retryAfter)); }
+        else { if (err?.status != null) rateBook.record(entry.careers_url, 'ok'); funnel.failed++; if (err?.status === 404 || /HTTP 404/.test(String(err?.message))) markChecked(entry, false); }
         recordBoardFailure(deadBoards, name, deadBoard, err);
         // A dead board and a dead resolver look identical one at a time; only
         // the *consecutive* run tells them apart, so any non-resolver outcome
@@ -1577,12 +1779,17 @@ async function main() {
       }
     }, ({ done, resumeAt }) => {
       lastDone = done;
+      // Crash recovery: coverage is saved every 100 boards, so an interrupted
+      // run keeps what it checked and the next run continues after it.
+      if (opts.rotate && done % 100 === 0) saveCoverage();
       curDone = done; curErrors = errors; curDeadSkipped = deadBoardsSkipped;
       lastResumeAt = resumeAt;
       if (done % 200 === 0 || done === entries.length) {
         progress(`  ${done}/${entries.length} scanned, ${newOffers.length} total matches\r`);
       }
-      if (done % CHECKPOINT_EVERY === 0 && !opts.dryRun) {
+      // Rotated runs resume from data/explore-coverage.json instead: the pick
+      // order changes run to run, so a positional checkpoint would be wrong.
+      if (done % CHECKPOINT_EVERY === 0 && !opts.dryRun && !opts.rotate) {
         saveDeadBoardsBestEffort(deadBoards);
         writeCheckpoint({
           ...checkpointBase(),
@@ -1600,7 +1807,7 @@ async function main() {
           },
         });
       }
-    }, () => resolverOutage);
+    }, () => { if (budgetExpired()) { budgetStopped = true; return true; } return resolverOutage; });
     // parallelEach reports a completed callback even when a retired board was
     // skipped, so remove those entries from the live scan total after the
     // source pass. The retired count remains visible separately.
@@ -1617,7 +1824,7 @@ async function main() {
       for (const entry of truncated) {
         let retrySignal;
         try {
-          await boardScope(source, `${name}/${entry.name} (retry)`, COMPANY_TIMEOUT_MS, async (signal) => {
+          await boardScope(source, `${name}/${entry.name} (retry)`, boardTimeoutMs(budgetEndsAt), async (signal) => {
             retrySignal = signal;
             const jobs = await source.provider.fetch(entry, ctx);
             recordBoardResult(deadBoards, name, boardKey(entry), 200);
@@ -1662,7 +1869,15 @@ async function main() {
     }
     totalErrors += errors;
     totalRetiredBoardsSkipped += deadBoardsSkipped;
-    if (!opts.dryRun) saveDeadBoardsBestEffort(deadBoards);
+    // Rotation keeps the retired-board ledger even in --dry-run: it is a cache
+    // of boards that answered 404, not job data.
+    if (!opts.dryRun || opts.rotate) saveDeadBoardsBestEffort(deadBoards);
+    if (budgetStopped && entries.length > lastDone) { funnel.notReachedThisRun = (funnel.notReachedThisRun ?? 0) + (entries.length - lastDone); totalCompaniesScanned -= entries.length - lastDone; }
+    {
+      const d = {};
+      for (const [k, v] of Object.entries(funnel)) if (typeof v === 'number') d[k] = v - (funnelAtStart[k] ?? 0);
+      funnelBySource[name] = { ...d, ...sourceStats, matchesKept: newOffers.length - offersAtStart, finishedAt: new Date().toISOString(), seconds: Math.round((Date.now() - sourceStartedAt) / 1000), sleptSeconds: Math.round((sleepMeter.sleptMs() - sleptAtStart) / 1000) };
+    }
     if (resolverOutage) {
       // Deliberately before completedSources/checkpoint: this source did NOT
       // finish, and marking it done would make --resume skip the rest of it.
@@ -1823,9 +2038,17 @@ async function main() {
   // The authoritative machine-readable result: lets a caller (e.g. the web)
   // tell a *degraded* scan (capped / stale dataset / undated dropped) apart
   // from a genuinely *empty* one. In --json mode stdout carries ONLY this.
+  saveCoverage();
+  if (opts.rotate) appendRunLog({ at: new Date().toISOString(), mode: opts.dryRun ? 'explore' : 'sweep', sources: opts.ats, sinceDays: opts.sinceDays, budgetSeconds: opts.budgetSeconds || null, limit: opts.limit === Infinity ? null : opts.limit, companiesScanned: totalCompaniesScanned, unreachable: totalErrors, budgetStopped, funnel, funnelBySource, postingsKept: offers.length, coverage: coverageReport(), rateLimits: rateBook.state().circuits });
   if (opts.json) {
     process.stdout.write(JSON.stringify({
       date,
+      coverage: coverageReport(),
+      funnel,
+      // 2026-11-23: per-source figures and the budget stop, so Explore can say
+      // which source completed, stopped at its time limit, or was blocked.
+      funnelBySource,
+      budgetStopped,
       sources: opts.ats,
       resumed: Boolean(checkpoint),
       sinceDays: opts.sinceDays,

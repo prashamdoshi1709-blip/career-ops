@@ -55,7 +55,10 @@ const MAX_PAGES_CAP = 1500;
 // silently truncates an entire tenant (e.g. a 3,383-posting tenant reduced to
 // 20 jobs on page 2). Non-transient errors (4xx other than 429) are not
 // retried — retrying a malformed request just wastes the budget.
-const RETRY_POLICY = { retries: 3 };
+// 2026-11-23: 5xx and timeouts are still retried; a 429 is not (see _http.mjs
+// retryOn429 and rate-limit-state.mjs). Retrying a rate-limited tenant three
+// times turned every limited board into four requests against the limiter.
+const RETRY_POLICY = { retries: 3, retryOn429: false };
 
 // Delay between successive pages *within one tenant's own pagination loop*
 // (not between tenants — that's scan-ats-full.mjs's concurrency, a separate
@@ -1170,13 +1173,16 @@ export default {
         let detail;
         try {
           detail = await fetchJsonWithRetry(meteredCtx, `${ep.cxsBase}${externalPath}`, detailOpts, policy);
-        } catch {
+        } catch (err) {
           // Fail soft, per posting. A detail document that 404s, rate-limits or
           // returns something unexpected leaves the placeholder exactly as it
           // was, which is the pre-#3860 behaviour — never a dropped posting and
           // never an empty location, which reads as "location unknown"
           // downstream and would be a worse lie than the count.
           failed++;
+          // 2026-11-23: a 429 stops the detail pass for this tenant: the rest
+          // would be asked of a host that has just said it is limiting us.
+          if (err?.status === 429) break;
           continue;
         }
         const places = locationsFromDetail(detail);

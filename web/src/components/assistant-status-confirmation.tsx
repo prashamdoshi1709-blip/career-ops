@@ -69,7 +69,7 @@ export function StatusConfirmationCard({ part, onConfirm }: {
           </button>
           <button type="button" aria-disabled={saving || undefined} aria-label={`Cancel: ${part.summary}`} onClick={(e) => decide(e.currentTarget, false)} className="rounded-full border border-border px-3 py-1 text-xs text-muted aria-disabled:opacity-50">Cancel</button>
         </div>}
-        {(part.state === "failed" || part.state === "unconfirmed") && <Link href="/pipeline?tab=ALL" aria-label={`Check tracker for: ${part.summary}`} className="mt-2 inline-block text-xs text-brand-text underline">Check current tracker status</Link>}
+        {(part.state === "failed" || part.state === "unconfirmed") && <Link href="/opportunities?tab=ALL" aria-label={`Check tracker for: ${part.summary}`} className="mt-2 inline-block text-xs text-brand-text underline">Check current tracker status</Link>}
       </div>
       <span role="status" aria-label={`Status change feedback: ${part.summary}`} aria-live="polite" aria-atomic="true" className="sr-only">{announcement}</span>
     </>

@@ -40,9 +40,14 @@ export const DEFAULT_FILTERS: ExploreFilters = {
   block: [],
   blockHard: [],
   alwaysAllow: [],
-  sinceDays: 7,
+  // 30, not 7 (2026-11-23): the scheduled sweeps use 30, and a 7-day Explore
+  // run found 0 relevant roles where a 30-day run found 3 (finance roles stay
+  // open for weeks; the date cut alone removed 30-60% of postings).
+  sinceDays: 30,
   ats: [...ATS_SOURCES],
-  limitPerAts: 150,
+  // 0 = no company cap (2026-11-22): each run checks as many companies as its
+  // time budget allows, Australian employers first, and the next run continues.
+  limitPerAts: 0,
 };
 
 /** Banded title-vs-profile overlap (web/src/lib/title-fit.mjs). Words, not
@@ -102,10 +107,17 @@ export type ScanEvent =
       companiesAvailable?: number;
       capHit?: boolean;
       datasetStatus?: Record<string, "ok" | "stale" | "empty">;
+      // Directory rotation coverage per source (scan-ats-full.mjs --rotate).
+      coverage?: Record<string, { available: number; coveredEver: number; covered30d: number; notYetScanned: number }>;
       postingsDroppedNoDate?: number;
       // Sources whose results are missing (ran out of time or crashed) while the
       // others finished — a partial result, never "all caught up".
       incomplete?: string[];
+      // 2026-11-23: per source — completed, partial (time limit), blocked
+      // (rate-limited) or unavailable (no result).
+      sourceStates?: { source: string; state: "completed" | "partial" | "blocked" | "unavailable"; note: string }[];
+      /** Portals-scan groups (SEEK, recruiters, employer sites) of the same run. */
+      groups?: Record<string, { targets: number; ok: number; failed: number; rateLimited: number; deferredRateLimit: number; retrieved: number; matched: number; dupes: number; newUnique: number }>;
       employerOutcome?: EmployerScanOutcome;
       employerSources?: { id: string; state: string; reason?: string }[];
     }
@@ -158,13 +170,18 @@ export function parseExplorePatch(
   ];
   for (const [field, key] of lists) {
     if (raw[key] === undefined) continue;
-    const incoming = cleanChips(raw[key]);
+    // 2026-11-23: a comma-separated string of TITLES is several alternatives
+    // ("Investment Banking Analyst, M&A Associate"), as the chip input and the
+    // ?q= link already treat it; it was kept as one phrase that matched nothing.
+    // Location lists keep their commas ("Sydney, NSW").
+    const value = (field === "positive" || field === "negative") && typeof raw[key] === "string" ? String(raw[key]).split(/[,;\n\t\r]+/) : raw[key];
+    const incoming = cleanChips(value);
     next[field] = (merge ? cleanChips([...(base[field] as string[]), ...incoming]) : incoming) as never;
   }
   if (raw.since !== undefined) next.sinceDays = clampNum(raw.since, 1, 60, base.sinceDays);
   if (raw.sinceDays !== undefined) next.sinceDays = clampNum(raw.sinceDays, 1, 60, base.sinceDays);
-  if (raw.limit !== undefined) next.limitPerAts = clampNum(raw.limit, 50, 500, base.limitPerAts);
-  if (raw.limitPerAts !== undefined) next.limitPerAts = clampNum(raw.limitPerAts, 50, 500, base.limitPerAts);
+  if (raw.limit !== undefined) next.limitPerAts = Number(raw.limit) === 0 ? 0 : clampNum(raw.limit, 50, 20000, base.limitPerAts);
+  if (raw.limitPerAts !== undefined) next.limitPerAts = Number(raw.limitPerAts) === 0 ? 0 : clampNum(raw.limitPerAts, 50, 20000, base.limitPerAts);
   if (raw.ats !== undefined) next.ats = cleanAts(raw.ats);
   return next;
 }

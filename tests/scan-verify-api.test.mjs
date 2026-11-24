@@ -5,6 +5,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { verifyOffers } from '../scan.mjs';
 
+// 2026-11-23: keep this file's progress logging off stdout. Under parallel
+// load, Node 24's test runner can mis-read a child's stdout that interleaves
+// many raw log lines with its own message stream ("Unable to deserialize
+// cloned data"), failing the file without any assertion failing. stderr
+// (console.warn/error) is not parsed and stays as it is.
+console.log = () => {};
+console.info = () => {};
+
 const offer = (url, extra = {}) => ({ company: 'Example', title: 'Platform Engineer', url, ...extra });
 const active = { result: 'active', code: 'greenhouse_api_ok', reason: 'Posting is live' };
 const gone = { result: 'expired', code: 'greenhouse_api_gone', reason: 'ATS API 404 — posting removed' };

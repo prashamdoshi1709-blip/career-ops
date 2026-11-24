@@ -441,8 +441,9 @@ for (const [label, detailImpl] of [
     detailRequests++;
     if (firstTry) {
       firstTry = false;
-      const err = new Error('rate limited');
-      err.status = 429;
+      // 503, not 429, since 2026-11-23: a 429 is no longer retried (below).
+      const err = new Error('service unavailable');
+      err.status = 503;
       throw err;
     }
     return DETAIL;
@@ -455,6 +456,22 @@ for (const [label, detailImpl] of [
   } else {
     fail(`retry did not enrich: ${enriched.location}`);
   }
+}
+
+// A detail GET answered 429 is not retried (2026-11-23): one request, and the
+// posting keeps its placeholder rather than the tenant being asked again.
+{
+  let detailRequests = 0;
+  await workday.fetch(ENTRY, mkCtx(async (url) => {
+    if (url.endsWith('/jobs')) return PAGE0;
+    detailRequests++;
+    const err = new Error('rate limited');
+    err.status = 429;
+    throw err;
+  }));
+  const placeholders = PAGE0.jobPostings.filter((p) => /Locations$/.test(p.locationsText ?? '')).length || 1;
+  if (detailRequests <= placeholders) pass('a 429 on a detail GET is not retried');
+  else fail(`expected at most ${placeholders} detail requests (no 429 retry), got ${detailRequests}`);
 }
 
 // A probe (verify-portals / discover-ats set ctx.maxPages) asks whether the

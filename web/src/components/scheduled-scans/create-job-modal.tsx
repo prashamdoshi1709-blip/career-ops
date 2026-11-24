@@ -98,9 +98,15 @@ export function CreateJobModal({
               >
                 <option value="full">Full ATS Dataset Sweep</option>
                 <option value="portals">Zero-Token Portals.yml</option>
+                <option value="recruiters">Specialist Recruiter Sites</option>
+                <option value="sweep">Progressive Directory Sweep</option>
               </select>
               <p className="mt-1 text-[11px] text-faint">
-                {engine === "full"
+                {engine === "recruiters"
+                  ? "Checks only the specialist recruiters' own mandate pages in portals.yml (source_type: specialist_recruiter), verifies each new link, 0 AI cost."
+                  : engine === "sweep"
+                  ? "Works through the whole Greenhouse/Lever/Ashby/Workday directory a few minutes per source each run, Australian employers first, continuing where the last run stopped (0 AI cost)."
+                  : engine === "full"
                   ? "Sweeps public Greenhouse/Lever/Ashby datasets."
                   : "Scans pre-configured portals.yml companies (0 AI cost)."}
               </p>

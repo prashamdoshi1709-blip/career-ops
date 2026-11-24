@@ -25,18 +25,18 @@ test("a finished score without a report stays on the worker log", () => {
   });
 });
 
-test("a saved report opens the pipeline page", () => {
+test("a saved report opens the job's Review page", () => {
   assert.deepEqual(inboxScoreTarget({ ...base, score: 4.2, reportN: 21 }), {
     evaluated: true,
-    href: "/pipeline/21",
+    href: "/opportunities/21",
     showScore: true,
   });
 });
 
-test("a saved report with no parsed score still opens the pipeline page", () => {
+test("a saved report with no parsed score still opens the job's Review page", () => {
   assert.deepEqual(inboxScoreTarget({ ...base, reportN: 21 }), {
     evaluated: true,
-    href: "/pipeline/21",
+    href: "/opportunities/21",
     showScore: false,
   });
 });

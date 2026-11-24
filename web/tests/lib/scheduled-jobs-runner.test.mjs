@@ -730,3 +730,41 @@ test("a non-object scheduled-job patch is rejected by input validation", () => {
     assert.throws(() => assertScheduledJobBody(value), /object/);
   }
 });
+
+test("an empty saved-scan filter inherits portals.yml location and exclusion filters instead of erasing them", () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "career-ops-scheduled-inherit-"));
+  fs.writeFileSync(
+    path.join(temp, "portals.yml"),
+    "title_filter:\n  positive: [analyst]\n  negative: [intern]\nlocation_filter:\n  strict: true\n  remote_title_fallback: false\n  always_allow: [Australia]\n  allow: [Australia, Sydney]\n  block: [Remote]\n",
+    "utf8",
+  );
+  const overlays = [];
+  const spawnFn = (_cmd, _args, options) => {
+    overlays.push(yaml.load(fs.readFileSync(options.env.CAREER_OPS_PORTALS, "utf8")));
+    return { status: 0, stdout: "New offers added: 0", stderr: "" };
+  };
+  try {
+    executeJob(temp, { id: "11111111-1111-4111-8111-111111111111", engine: "portals", filters: { allow: [], alwaysAllow: [], negative: [] } }, { spawnFn });
+    executeJob(temp, { id: "22222222-2222-4222-8222-222222222222", engine: "portals", filters: { allow: ["Sydney"], negative: ["graduate"], blockHard: ["Singapore"] } }, { spawnFn });
+    const [inherited, narrowed] = overlays;
+    assert.deepEqual(inherited.location_filter.allow, ["Australia", "Sydney"]);
+    assert.deepEqual(inherited.location_filter.always_allow, ["Australia"]);
+    assert.equal(inherited.location_filter.strict, true);
+    assert.equal(inherited.location_filter.remote_title_fallback, false);
+    assert.deepEqual(inherited.title_filter.negative, ["intern"]);
+    assert.deepEqual(narrowed.location_filter.allow, ["Sydney"]);
+    assert.deepEqual(narrowed.location_filter.block, ["Remote"]);
+    assert.deepEqual(narrowed.location_filter.block_hard, ["Singapore"]);
+    assert.deepEqual(narrowed.title_filter.negative, ["intern", "graduate"]);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("sweep engine: time-budgeted rotation over every source, no company cap (2026-11-22)", () => {
+  assert.deepEqual(buildScanCommand({ engine: "sweep", filters: { sinceDays: 30 } }), {
+    script: "scan-ats-full.mjs",
+    args: ["--since", "30", "--ats", "greenhouse,lever,ashby,workday", "--rotate", "--budget-seconds", "300", "--json"],
+  });
+  assert.deepEqual(buildScanCommand({ engine: "sweep", filters: { ats: ["lever"], budgetSeconds: 5000 } }).args.slice(-4), ["--rotate", "--budget-seconds", "900", "--json"]);
+});

@@ -122,6 +122,8 @@ export function EditJobModal({
               >
                 <option value="full">Full ATS Dataset Sweep</option>
                 <option value="portals">Zero-Token Portals.yml</option>
+                <option value="sweep">Progressive Directory Sweep</option>
+                <option value="recruiters">Specialist Recruiter Sites</option>
               </select>
             </div>
 

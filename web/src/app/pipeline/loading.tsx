@@ -1,3 +1,3 @@
-import { PipelinePageSkeleton } from "@/components/page-loading-skeletons";
-
-export default PipelinePageSkeleton;
+export default function Loading() {
+  return null;
+}

@@ -1,21 +1,8 @@
-import { Suspense } from "react";
-import { pipelineSummary } from "@/lib/career-ops";
-import { pendingInbox } from "@/lib/inbox-pending.mjs";
-import { PipelineView } from "@/components/pipeline-view";
-import { pipelineTab } from "@/lib/pipeline-navigation.mjs";
+import { redirect } from "next/navigation";
+import { pipelineRedirectTarget } from "@/lib/pipeline-redirect.mjs";
 
-export const dynamic = "force-dynamic"; // always read fresh local files
-
-// Tracker tabs show the inbox only as a count, so they get the count and not
-// the postings. The inbox is most of the page payload on a large pipeline.
-export default async function PipelinePage({ searchParams }: { searchParams: Promise<{ tab?: string | string[] }> }) {
-  const { tab } = await searchParams;
-  const onInbox = pipelineTab(tab) === "INBOX";
-  const { inbox, applications } = pipelineSummary();
-  const pending = pendingInbox(inbox);
-  return (
-    <Suspense>
-      <PipelineView applications={applications} inbox={onInbox ? pending : null} inboxCount={pending.length} />
-    </Suspense>
-  );
+// Local customisation (2026-11-11): Pipeline was merged into All Job Opportunities.
+// 2026-11-22: the query string is kept.
+export default async function PipelineRedirect({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  redirect(pipelineRedirectTarget([], await searchParams));
 }

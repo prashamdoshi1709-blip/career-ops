@@ -10,7 +10,7 @@ const src = readFileSync(
 );
 
 test("Today primary action opens the report, not Mark applied", () => {
-  const primary = src.indexOf('href={`/pipeline/${app.n}`}');
+  const primary = src.indexOf('href={`/opportunities/${app.n}`}');
   const mark = src.indexOf('setStatus("Applied")');
   assert.notEqual(primary, -1);
   assert.notEqual(mark, -1);

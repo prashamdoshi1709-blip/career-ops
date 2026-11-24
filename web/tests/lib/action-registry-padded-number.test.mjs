@@ -8,11 +8,13 @@ const { dispatch } = await import("../../src/app/actions/registry.ts");
 function context() {
   const started = [];
   const writes = [];
+  const pushed = [];
   return {
     started,
     writes,
+    pushed,
     ctx: {
-      push() {},
+      push(p) { pushed.push(p); },
       replace() {},
       startJob(opts) {
         started.push(opts);
@@ -34,10 +36,14 @@ function context() {
   };
 }
 
-test("generatePdf names the company for a zero-padded application number", () => {
-  const { ctx, started } = context();
+// Local customisation (2026-11-10): generatePdf no longer starts the retired
+// generic-template CV worker; it opens the job page, where the shared
+// original-format generator runs. It must never start a worker.
+test("generatePdf opens the job page and starts no worker", () => {
+  const { ctx, started, pushed } = context();
   dispatch("generatePdf", { n: "007" }, ctx);
-  assert.equal(started[0].title, "CV PDF · Acme");
+  assert.deepEqual(started, []);
+  assert.deepEqual(pushed, ["/opportunities/007"]);
 });
 
 test("setStatus names the company and role for a zero-padded application number", async () => {
@@ -48,12 +54,12 @@ test("setStatus names the company and role for a zero-padded application number"
   assert.deepEqual(writes, [["007", "Applied"]]);
 });
 
-test("an unknown or non-numeric number falls back to the raw label", () => {
-  const { ctx, started } = context();
-  dispatch("generatePdf", { n: "99" }, ctx);
+test("generatePdf ignores a non-numeric number and starts nothing", () => {
+  const { ctx, started, pushed } = context();
   dispatch("generatePdf", { n: "abc" }, ctx);
   dispatch("generatePdf", { n: "7abc" }, ctx);
-  assert.deepEqual(started.map((s) => s.title), ["CV PDF · #99", "CV PDF · #abc", "CV PDF · #7abc"]);
+  assert.deepEqual(started, []);
+  assert.deepEqual(pushed, []);
 });
 
 

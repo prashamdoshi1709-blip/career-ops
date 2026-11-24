@@ -62,6 +62,11 @@ export function JobCard({
   };
 
   const isFull = job.engine === "full";
+  // 2026-11-23: each engine gets its own label (sweep and recruiter jobs were
+  // shown as "Zero-Token Portals"), and run times show the date in the job's
+  // timezone (a run from four days ago read like one from today).
+  const engineLabel = job.engine === "full" ? "Full ATS Sweep" : job.engine === "sweep" ? "Directory Sweep" : job.engine === "recruiters" ? "Recruiter Sites" : "Zero-Token Portals";
+  const at = (iso: string) => new Date(iso).toLocaleString("en-AU", { timeZone: job.timezone || undefined, weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   const isActive = job.status === "active";
   const positiveList = job.filters?.positive || [];
   const letter = (job.name || "S").trim().charAt(0).toUpperCase();
@@ -136,7 +141,7 @@ export function JobCard({
             )}
           >
             {isFull ? <Globe className="size-3" /> : <Zap className="size-3" />}
-            {isFull ? "Full ATS Sweep" : "Zero-Token Portals"}
+            {engineLabel}
           </span>
 
           <span
@@ -174,12 +179,20 @@ export function JobCard({
           ) : job.lastRunAt ? (
             <p className="flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
               <CheckCircle2 className="size-3.5 shrink-0" />
-              Last run {new Date(job.lastRunAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ·{" "}
-              {job.rolesFoundCount || 0} roles found
+              Last run {at(job.lastRunAt)} ·{" "}
+              {job.rolesFoundCount || 0} new roles
             </p>
           ) : (
             <p className="text-faint">No runs recorded yet</p>
           )}
+          {job.lastWarning && (
+            <p className="mt-0.5 flex items-start gap-1.5 text-amber-600 dark:text-amber-400">
+              <AlertCircle className="mt-0.5 size-3 shrink-0" />
+              <span>Succeeded with problems: {job.lastWarning}</span>
+            </p>
+          )}
+          {isActive && job.nextRunAt && <p className="mt-0.5 text-muted">Next run {at(job.nextRunAt)}</p>}
+          {!isActive && <p className="mt-0.5 text-faint">Paused: no next run</p>}
           {runMessage && <p className="mt-1 font-medium text-brand">{runMessage}</p>}
         </div>
       </div>

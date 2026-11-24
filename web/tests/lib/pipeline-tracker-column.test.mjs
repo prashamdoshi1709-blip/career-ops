@@ -24,11 +24,12 @@ test("sortable Pipeline headers use native keyboard-operable buttons", () => {
 });
 
 test("the visible tracker identifier uses the canonical tracker route", () => {
-  assert.match(source, /const detailHref = `\/pipeline\/\$\{encodeURIComponent\(r\.n\)\}/);
+  assert.match(source, /const detailHref = `\/opportunities\/\$\{encodeURIComponent\(r\.n\)\}/);
   assert.match(source, /<Link href=\{detailHref\}[^>]*>\s*#\{r\.n\}\s*<\/Link>/);
 });
 
 test("the lower-priority Date header and cells hide below the large breakpoint", () => {
-  assert.match(source, /k === "date" && "hidden lg:table-cell"/);
+  // 2026-11-09: header classes now come from the COLUMNS list.
+  assert.match(source, /\{ key: "date", label: "Evaluated", sortable: true, className: "hidden lg:table-cell" \}/);
   assert.match(source, /<td className="hidden whitespace-nowrap px-4 py-3 text-faint tabular-nums lg:table-cell">\{r\.date\}<\/td>/);
 });

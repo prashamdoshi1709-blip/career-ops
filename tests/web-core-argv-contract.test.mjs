@@ -96,6 +96,22 @@ const CALL_SITES = [
     probe: 'flags-only',
   },
   {
+    // 2026-11-24: Explore also runs the portals scan (SEEK, recruiters,
+    // tracked employer sites) as a dry run with a --json receipt.
+    source: 'web/src/lib/core/portals-scan.ts',
+    script: 'scan.mjs',
+    args: ['--dry-run', '--json', '--quiet'],
+    probe: 'flags-only',
+  },
+  {
+    // 2026-11-24: the LinkedIn intake reads pasted text on stdin; with none it
+    // reads no jobs and sends no request, so the real argv is safe to run.
+    source: 'web/src/app/api/linkedin-intake/route.ts',
+    script: 'linkedin-intake.mjs',
+    args: ['--json', '--add'],
+    probe: 'run',
+  },
+  {
     source: 'web/src/app/api/quiet-companies/route.ts',
     script: 'rejection-latency.mjs',
     // The route parses stdout, so the payload is the contract, not just exit 0.

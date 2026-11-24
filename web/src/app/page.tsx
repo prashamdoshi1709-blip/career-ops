@@ -8,6 +8,7 @@ import { OnboardingBanner } from "@/components/onboarding-banner";
 import { OnboardingProgress } from "@/components/home/onboarding-progress";
 import { FirstRunHome } from "@/components/home/first-run-home";
 import { TodayDashboard } from "@/components/home/today-dashboard";
+import { TodayOverview } from "@/components/home/today-overview";
 
 export const dynamic = "force-dynamic"; // always read fresh local files at request time (never at build — CI has no user data)
 
@@ -39,6 +40,7 @@ export default function Home() {
       <div className="mx-auto max-w-5xl px-6 pt-6">
         <OnboardingProgress />
       </div>
+      <TodayOverview />
       <TodayDashboard applications={applications} reasons={reasons} legitimacy={legitimacy} inbox={inbox} inBetween={phase === "in-between"} />
     </>
   );

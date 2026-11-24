@@ -17,6 +17,8 @@ import { AiSearchBox } from "./ai-search-box";
 import { ResultsList, type EnrichedOffer } from "./results-list";
 import { useExplore } from "./explore-provider";
 import { ScheduleJobAction } from "./schedule-job-action";
+import { LinkedInIntake } from "./linkedin-intake";
+import { CoveragePanel } from "./coverage-panel";
 
 // Same shape as core normalizeTextKey(s, " ") — never [^a-z0-9] (#2666).
 const norm = (s: string) => normalizeTextKey(s, " ");
@@ -41,10 +43,17 @@ export function ExplorerView({
   appsSnapshot: Application[];
   rootExists: boolean;
 }) {
-  const { filters, setFilters, initFilters, phase, running, offers, discover, loadFresh, status, employerOutcome, error, scannerMissing, mode, setMode, aiIntent, setAiIntent, discoverAI, companiesScanned, companiesAvailable, capHit, droppedNoDate, partial } = useExplore();
+  const { filters, setFilters, initFilters, phase, running, offers, discover, loadFresh, status, employerOutcome, error, scannerMissing, mode, setMode, aiIntent, setAiIntent, discoverAI, companiesScanned, companiesAvailable, capHit, droppedNoDate, partial, coverage, sourceStates } = useExplore();
+  // 2026-11-23: say per source whether it completed, stopped at its time limit,
+  // was blocked by rate limits or returned nothing, instead of one "partial".
+  const SOURCE_LABEL: Record<string, string> = { seek: "SEEK", recruiters: "Specialist recruiters", employers: "Employer sites", greenhouse: "Greenhouse", lever: "Lever", ashby: "Ashby", workday: "Workday" };
+  const STATE_LABEL: Record<string, string> = { completed: "completed", partial: "partial", blocked: "blocked by rate limits, retried later", unavailable: "unavailable" };
+  // SEEK, recruiters and employer sites carry their figures (matching, already
+  // in Career-Ops, new), so a zero result says why.
+  const stateNote = sourceStates.length ? ` ${sourceStates.map((x) => `${SOURCE_LABEL[x.source] ?? x.source}: ${STATE_LABEL[x.state] ?? x.state}${x.note ? ` (${x.note})` : ""}`).join(" · ")}.` : "";
   const scanNote =
     companiesScanned > 0
-      ? `Scanned ${companiesScanned.toLocaleString()}${companiesAvailable > companiesScanned ? ` of ${companiesAvailable.toLocaleString()}` : ""} compan${companiesScanned === 1 ? "y" : "ies"}${partial ? " · some sources were unreachable" : ""}.`
+      ? `Scanned ${companiesScanned.toLocaleString()}${companiesAvailable > companiesScanned ? ` of ${companiesAvailable.toLocaleString()}` : ""} compan${companiesScanned === 1 ? "y" : "ies"}${partial && !sourceStates.length ? " · some sources were unreachable" : ""}.${stateNote}`
       : undefined;
   const inited = useRef(false);
   const [refineOpen, setRefineOpen] = useState(false);
@@ -209,8 +218,11 @@ export function ExplorerView({
             </div>
           )}
 
+          <LinkedInIntake />
+          {<CoveragePanel refreshKey={phase === "scanning" ? 0 : companiesScanned} />}
+
           {isResults && capHit && (
-            <CappedBanner companiesScanned={companiesScanned} companiesAvailable={companiesAvailable} onRefine={() => setRefineOpen(true)} />
+            <CappedBanner companiesScanned={companiesScanned} companiesAvailable={companiesAvailable} coverage={coverage} onRefine={() => setRefineOpen(true)} />
           )}
         </>
       )}
@@ -258,6 +270,7 @@ export function ExplorerView({
               companiesAvailable={companiesAvailable}
               capHit={capHit}
               droppedNoDate={droppedNoDate}
+              coverage={coverage}
               partial={partial}
             />
           )}
@@ -314,6 +327,7 @@ function DegradedCard({
   capHit,
   droppedNoDate,
   partial,
+  coverage = null,
 }: {
   onRetry: () => void;
   companiesScanned: number;
@@ -321,6 +335,7 @@ function DegradedCard({
   capHit: boolean;
   droppedNoDate: number;
   partial: boolean;
+  coverage?: Coverage;
 }) {
   // 0 results, but the scan was NOT a clean full search → never "all caught up".
   // Pick the most informative reason (authoritative when the scanner's --json mode
@@ -329,8 +344,8 @@ function DegradedCard({
   let body =
     "The public ATS directories didn’t respond — usually a transient network hiccup or rate-limit, so nothing could be searched. This isn’t “all caught up”; a retry in a moment usually clears it.";
   if (companiesScanned > 0 && capHit) {
-    title = "No matches in the slice we searched.";
-    body = `The scan is capped, so it only searched ${companiesScanned.toLocaleString()}${companiesAvailable > companiesScanned ? ` of ${companiesAvailable.toLocaleString()}` : ""} companies — not the whole network. Raise scan depth (Refine search) or narrow your roles, then re-cast to look deeper.`;
+    title = "No matching jobs found in the companies checked.";
+    body = `No matching roles in this sample of ${companiesScanned.toLocaleString()}${companiesAvailable > companiesScanned ? ` of ${companiesAvailable.toLocaleString()}` : ""} companies. That is not the same as no jobs: the rest of the directory was not searched in this run. Run again and Explore continues with companies not yet checked; a scheduled Progressive Directory Sweep does this automatically. ${coverageLine(coverage)}`.trim();
   } else if (companiesScanned > 0 && droppedNoDate > 0) {
     title = "Fresh-looking roles were skipped for missing dates.";
     body = `${droppedNoDate.toLocaleString()} posting${droppedNoDate === 1 ? "" : "s"} matched but had no clear publish date, so the freshness filter dropped them. Widening the time window often brings dated equivalents back.`;
@@ -350,7 +365,18 @@ function DegradedCard({
   );
 }
 
-function CappedBanner({ companiesScanned, companiesAvailable, onRefine }: { companiesScanned: number; companiesAvailable: number; onRefine: () => void }) {
+type Coverage = Record<string, { available: number; coveredEver: number; covered30d: number; notYetScanned: number }> | null;
+
+/** "Directory coverage: 2,950 of 27,806 companies scanned at least once (2,950 in the last 30 days)". */
+export function coverageLine(coverage: Coverage): string {
+  if (!coverage) return "";
+  const v = Object.values(coverage);
+  if (!v.length) return "";
+  const total = v.reduce((n, c) => n + c.available, 0), ever = v.reduce((n, c) => n + c.coveredEver, 0), recent = v.reduce((n, c) => n + c.covered30d, 0);
+  return `Directory coverage for these sources: ${ever.toLocaleString()} of ${total.toLocaleString()} companies scanned at least once (${recent.toLocaleString()} in the last 30 days). The next run continues with companies not yet scanned.`;
+}
+
+function CappedBanner({ companiesScanned, companiesAvailable, coverage = null, onRefine }: { companiesScanned: number; companiesAvailable: number; coverage?: Coverage; onRefine: () => void }) {
   // Results ARE present, but the scan was capped — tell the user there's more, so a
   // partial list never reads as "everything there is".
   return (
@@ -359,6 +385,7 @@ function CappedBanner({ companiesScanned, companiesAvailable, onRefine }: { comp
         Showing a capped slice — searched {companiesScanned.toLocaleString()}
         {companiesAvailable > companiesScanned ? ` of ${companiesAvailable.toLocaleString()}` : ""} companies.
       </span>
+      {coverageLine(coverage) && <span className="w-full text-[12px] text-muted">{coverageLine(coverage)}</span>}
       <button onClick={onRefine} className="font-medium text-brand hover:underline">
         Raise scan depth to search deeper
       </button>
@@ -386,7 +413,7 @@ function FailedCard({ msg, scannerMissing, onRetry }: { msg: string; scannerMiss
           update career-ops, or paste a job URL on the pipeline to evaluate it directly.
         </p>
         <div className="mt-4 flex flex-wrap justify-center gap-2">
-          <Link href="/pipeline" className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3.5 py-2 text-sm font-semibold text-brand-foreground transition hover:brightness-110">
+          <Link href="/opportunities" className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3.5 py-2 text-sm font-semibold text-brand-foreground transition hover:brightness-110">
             Open pipeline
           </Link>
           <Link href="/config" className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3.5 py-2 text-sm font-medium text-foreground transition hover:border-brand/40 hover:text-brand">

@@ -15,9 +15,10 @@ const TONE: Record<string, { dot: string; label: string; chip: string }> = {
   live: { dot: "bg-emerald-500", label: "live", chip: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400" },
   empty: { dot: "bg-amber-500", label: "live · empty", chip: "bg-amber-500/15 text-amber-700 dark:text-amber-400" },
   broken: { dot: "bg-red-500", label: "broken", chip: "bg-red-500/15 text-red-700 dark:text-red-400" },
+  temporary: { dot: "bg-amber-500", label: "temporary · retried", chip: "bg-amber-500/15 text-amber-700 dark:text-amber-400" },
   skipped: { dot: "bg-zinc-400", label: "no ATS", chip: "bg-surface-hover text-muted" },
 };
-const ORDER: Record<string, number> = { broken: 0, empty: 1, live: 2, skipped: 3 };
+const ORDER: Record<string, number> = { broken: 0, temporary: 1, empty: 2, live: 3, skipped: 4 };
 
 export function PortalsView({ watched }: { watched: WatchedCompany[] }) {
   const [res, setRes] = useState<Result | null>(null);
@@ -46,6 +47,7 @@ export function PortalsView({ watched }: { watched: WatchedCompany[] }) {
 
   const companies = res?.companies ?? [];
   const broken = companies.filter((c) => c.status === "broken");
+  const temporary = companies.filter((c) => c.status === "temporary");
   const liveN = companies.filter((c) => c.status === "live" || c.status === "empty").length;
   const sorted = [...companies].sort((a, b) => (ORDER[a.status] ?? 9) - (ORDER[b.status] ?? 9));
 
@@ -90,6 +92,7 @@ export function PortalsView({ watched }: { watched: WatchedCompany[] }) {
           <p className="text-sm text-muted">
             <span className="tabular-nums text-emerald-600 dark:text-emerald-400">{liveN}</span> live ·{" "}
             <span className="tabular-nums text-red-600 dark:text-red-400">{broken.length}</span> broken ·{" "}
+            <span className="tabular-nums text-amber-600 dark:text-amber-400">{temporary.length}</span> temporarily unavailable (rate-limited or offline; still monitored, retried automatically) ·{" "}
             <span className="tabular-nums">{companies.length}</span> tracked
           </p>
           {broken.length > 0 && (
@@ -157,8 +160,8 @@ function WatchedList({ watched }: { watched: WatchedCompany[] }) {
     <div className="mt-5">
       <p className="text-sm text-muted">
         <span className="tabular-nums text-foreground">{scanned}</span> scanned ·{" "}
-        <span className="tabular-nums">{watched.length - scanned}</span> paused · run a health check to see which boards
-        still answer
+        <span className="tabular-nums">{watched.length - scanned}</span> switched off in portals.yml (not scanned; mostly
+        example employers outside Australian finance) · run a health check to see which boards still answer
       </p>
       <ul className="mt-4 divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface/40">
         {watched.map((c, i) => (

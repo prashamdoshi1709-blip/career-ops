@@ -497,6 +497,11 @@ async function withRetry(request, ctx, policy = {}) {
       // A board whose watchdog has already fired must not keep retrying: that is
       // the 4-attempts-per-slice storm a timed-out Workday board left running in
       // the background (#5570). The abort is terminal, not a transient failure.
+      // policy.retryOn429 === false (2026-11-23, Workday): a 429 ends the
+      // request at once. Retrying a host that is rate-limiting this client only
+      // re-provokes the limit; the caller's circuit (rate-limit-state.mjs)
+      // decides when to try again.
+      if (policy.retryOn429 === false && err?.status === 429) throw err;
       if (attempt === retries || !isRetryableError(err) || currentAbortSignal()?.aborted) throw err;
       // Cap the backoff at maxDelayMs MINUS the jitter, so the jittered total
       // still honours the policy limit. Clamping the sum instead would erase

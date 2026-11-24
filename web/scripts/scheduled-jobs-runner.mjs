@@ -17,6 +17,7 @@ import { scheduledRunnerResourcePath, scheduledStorePath } from "../src/lib/sche
 import { getCareerOpsRoot } from "../../path-resolver.mjs";
 import { getProfilePath } from "../src/lib/core/profile-path.mjs";
 import { scanFailureMessage } from "../src/lib/scheduled-scan-error.mjs";
+import { historyMark, scanBreakdown, breakdownMessage } from "../src/lib/scan-breakdown.mjs";
 
 const CODE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 export const MAX_RUNS = 100;
@@ -118,6 +119,26 @@ export function buildScanCommand(job) {
       args: ["--since", String(sinceDays), "--quiet"],
     };
   }
+  // 2026-11-23: specialist recruiter sites only, daily. Each recruiter entry
+  // carries its own max_posting_age_days, so no --since; --verify checks every
+  // new link before it reaches the inbox.
+  if (job.engine === "recruiters") {
+    return {
+      script: "scan.mjs",
+      args: ["--source-type", "specialist_recruiter", "--verify", "--quiet"],
+    };
+  }
+  // 2026-11-22: progressive sweep. No company cap: each source gets a time
+  // budget (default 300s, 60..900), stops cleanly, and the next run continues
+  // from data/explore-coverage.json. Four sources stay inside SCAN_TIMEOUT_MS.
+  if (job.engine === "sweep") {
+    const budget = numericFilter(filters.budgetSeconds, 300, 60, 900);
+    const sweepAts = Array.isArray(filters.ats) && filters.ats.length ? filters.ats.join(",") : "greenhouse,lever,ashby,workday";
+    return {
+      script: "scan-ats-full.mjs",
+      args: ["--since", String(sinceDays), "--ats", sweepAts, "--rotate", "--budget-seconds", String(budget), "--json"],
+    };
+  }
 
   const ats = Array.isArray(filters.ats) && filters.ats.length
     ? filters.ats.join(",")
@@ -129,8 +150,42 @@ export function buildScanCommand(job) {
   };
 }
 
+/**
+ * 2026-11-23: problems a successful run still had, from the run logs the
+ * scanners wrote after `sinceIso`: boards that failed, answered 429, or were
+ * held back by an open rate-limit circuit (rate-limit-state.mjs). A run exits
+ * 0 when only some sources failed, so without this "success" hid them.
+ * Returns a short sentence, or "" when there was nothing to report.
+ */
+export function sourceWarnings(root, engine, sinceIso) {
+  const read = (name) => { try { return fs.readFileSync(path.join(root, "data", name), "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((r) => r && r.at >= sinceIso); } catch { return []; } };
+  const parts = [];
+  const add = (label, failed, limited, paused) => {
+    const bits = [];
+    if (failed) bits.push(`${failed} failed`);
+    if (limited) bits.push(`${limited} rate-limited`);
+    if (paused) bits.push(`${paused} paused by rate limits (not asked)`);
+    if (bits.length) parts.push(`${label}: ${bits.join(", ")}`);
+  };
+  if (engine === "sweep" || engine === "full") {
+    let slept = 0;
+    for (const r of read("explore-runs.jsonl")) {
+      for (const [src, f] of Object.entries(r.funnelBySource ?? {})) { add(src[0].toUpperCase() + src.slice(1), 0, f.rateLimited ?? 0, f.deferredRateLimit ?? 0); slept += f.sleptSeconds ?? 0; }
+    }
+    // The Mac sleeping mid-run (2026-11-23: 901s of a 935s Workday sweep)
+    // uses up the time budget without scanning; say so rather than look slow.
+    if (slept >= 60) parts.push(`Mac was asleep for ${Math.round(slept / 60)} min of this run, so it scanned less`);
+  } else {
+    const names = { seek: "SEEK", employers: "Employer sites", recruiters: "Recruiters" };
+    for (const r of read("source-runs.jsonl")) for (const [g, x] of Object.entries(r.groups ?? {})) add(names[g] ?? g, x.failed ?? 0, x.rateLimited ?? 0, x.deferredRateLimit ?? 0);
+  }
+  const open = (() => { try { return Object.entries(JSON.parse(fs.readFileSync(path.join(root, "data", "rate-limit-state.json"), "utf8")).circuits ?? {}).filter(([, c]) => c.state === "open").map(([k]) => k.replace("workday:", "")); } catch { return []; } })();
+  if (open.length && parts.some((p) => /rate/.test(p))) parts.push(`Workday paused: ${open.join(", ")}`);
+  return parts.join("; ");
+}
+
 export function extractRolesFound(engine, stdout) {
-  if (engine === "full") {
+  if (engine === "full" || engine === "sweep") {
     try {
       const result = JSON.parse(stdout);
       return Number.isFinite(Number(result.postingsKept)) ? Number(result.postingsKept) : 0;
@@ -158,18 +213,31 @@ function writeJobPortals(root, job) {
   if (!positive.length && !fallbackPositive.length) {
     throw new Error("Scheduled scans require title keywords in the job or portals.yml title_filter.positive.");
   }
+  // Local customisation (2026-11-09): a saved scan may NARROW portals.yml, never
+  // silently widen it. Previously an empty list on the job replaced the user's
+  // portals.yml list, so a scan saved with blank fields ran with no location
+  // filter and no excluded titles (157 overseas roles on 2026-11-04).
+  //   - allow / always_allow: the job's list wins only when it is non-empty;
+  //     an empty list inherits portals.yml.
+  //   - negative titles, block, block_hard: union of portals.yml and the job
+  //     (more exclusions are always safe).
+  //   - strict / remote_title_fallback and every other key: kept from portals.yml.
+  const listOf = (value) => (Array.isArray(value) ? value.filter((v) => typeof v === "string" && v.trim()) : []);
+  const union = (a, b) => [...new Set([...listOf(a), ...listOf(b)])];
+  const narrowOrInherit = (jobList, baseList) => (listOf(jobList).length ? listOf(jobList) : listOf(baseList));
+  const baseLocation = base.location_filter || {};
   base.title_filter = {
     ...(base.title_filter || {}),
     positive: positive.length ? positive : fallbackPositive,
-    negative: Array.isArray(filters.negative) ? filters.negative : [],
+    negative: union(base.title_filter?.negative, filters.negative),
   };
   if (base.title_filter_full) base.title_filter_full = { ...base.title_filter_full, ...base.title_filter };
   base.location_filter = {
-    ...(base.location_filter || {}),
-    allow: Array.isArray(filters.allow) ? filters.allow : [],
-    block: Array.isArray(filters.block) ? filters.block : [],
-    block_hard: Array.isArray(filters.blockHard) ? filters.blockHard : [],
-    always_allow: Array.isArray(filters.alwaysAllow) ? filters.alwaysAllow : [],
+    ...baseLocation,
+    allow: narrowOrInherit(filters.allow, baseLocation.allow),
+    always_allow: narrowOrInherit(filters.alwaysAllow, baseLocation.always_allow),
+    block: union(baseLocation.block, filters.block),
+    block_hard: union(baseLocation.block_hard, filters.blockHard),
   };
 
   const tempDir = path.join(root, "data", "tmp");
@@ -197,6 +265,9 @@ export function executeJob(root, job, options = {}) {
     try {
       tempPortals = writeJobPortals(root, job);
       const command = buildScanCommand(job);
+      // 2026-11-11: remember where scan-history ends, to report what this run added.
+      const mark = historyMark(root);
+      const runStartedIso = new Date().toISOString();
       const result = spawnFn(
         process.execPath,
         [command.script, ...command.args],
@@ -219,12 +290,16 @@ export function executeJob(root, job, options = {}) {
 
       if (result.status === 0) {
         const rolesFound = extractRolesFound(job.engine || "full", result.stdout || "");
+        const warnings = options.spawnFn ? "" : sourceWarnings(root, job.engine || "full", runStartedIso);
         return {
           state: "success",
           attempt,
           rolesFound,
+          ...(warnings ? { warnings } : {}),
           durationMs: Date.now() - startedAt,
-          message: `Scan finished with ${rolesFound} matching role${rolesFound === 1 ? "" : "s"}.`,
+          message: ((job.engine === "portals" || job.engine === "recruiters") && !options.spawnFn)
+            ? (() => { try { return breakdownMessage(scanBreakdown(root, mark)); } catch { return `Scan finished with ${rolesFound} matching role${rolesFound === 1 ? "" : "s"}.`; } })()
+            : `Scan finished with ${rolesFound} matching role${rolesFound === 1 ? "" : "s"}.`,
         };
       }
       lastError = scanFailureMessage(result, { timeoutMs: SCAN_TIMEOUT_MS });
@@ -269,11 +344,14 @@ export async function recordCompletion(storePath, claim, result, inMemoryStore =
       current.updatedAt = at;
       if (result.state === "failed") current.lastError = result.message;
       else delete current.lastError;
+      if (result.warnings) current.lastWarning = result.warnings;
+      else delete current.lastWarning;
     }
 
     const run = store.runs.find((item) => item.id === claim.runId && item.jobId === job.id);
-    if (run) Object.assign(run, { at, durationMs: result.durationMs, state: result.state, attempt: result.attempt, message: result.message, rolesFound: result.rolesFound, engine: job.engine || "full" });
-    else store.runs.unshift({ id: claim.runId || randomUUID(), jobId: job.id, at, durationMs: result.durationMs, state: result.state, attempt: result.attempt, message: result.message, rolesFound: result.rolesFound, engine: job.engine || "full" });
+    const warn = result.warnings ? { warnings: result.warnings } : {};
+    if (run) { Object.assign(run, { at, durationMs: result.durationMs, state: result.state, attempt: result.attempt, message: result.message, rolesFound: result.rolesFound, engine: job.engine || "full" }, warn); if (!result.warnings) delete run.warnings; }
+    else store.runs.unshift({ id: claim.runId || randomUUID(), jobId: job.id, at, durationMs: result.durationMs, state: result.state, attempt: result.attempt, message: result.message, rolesFound: result.rolesFound, engine: job.engine || "full", ...warn });
     store.queue = store.queue.filter((item) => !(item.id === claim.queueId && item.claimToken === claim.claimToken));
     if (store.runs.length > MAX_RUNS) store.runs = store.runs.slice(0, MAX_RUNS);
   };

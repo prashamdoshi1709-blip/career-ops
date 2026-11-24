@@ -74,7 +74,13 @@ export async function GET() {
   const companies: { name: string; status: string; detail: string }[] = [];
   for (const line of stdout.split("\n")) {
     const m = line.match(/^\s*(✅|🟡|❌|➖)\s+(.+?)\s+—\s+(.*)$/);
-    if (m) companies.push({ name: m[2].trim(), status: STATUS[m[1]] ?? "unknown", detail: m[3].trim() });
+    if (!m) continue;
+    // 2026-11-23: rate limits, network and server errors are temporary; the
+    // scanners back off and retry them. Only the rest is a broken careers link
+    // (and only that gets the "fix the careers_url" prompt).
+    const detail = m[3].trim();
+    const temporary = m[1] === "❌" && /\((rate-limited, temporary|network error|server error)\)|HTTP 429|Too Many Requests|paused by rate limits/i.test(detail);
+    companies.push({ name: m[2].trim(), status: temporary ? "temporary" : STATUS[m[1]] ?? "unknown", detail });
   }
   return Response.json({ available: true, configured: true, companies });
 }

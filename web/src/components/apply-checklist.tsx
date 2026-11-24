@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 import { PageFrame } from "@/components/page-frame";
 import { MarkPdfReadyButton } from "@/components/mark-pdf-ready-button";
+import { StatePill, type DocInfo } from "@/components/doc-links";
 import { saveStatus } from "@/lib/pipeline-status.mjs";
 
 type CopyItem = { label: string; text: string };
@@ -32,6 +33,7 @@ export function ApplyChecklist({
   reportNum,
   status,
   pdfReady,
+  docState = null,
 }: {
   company: string;
   role: string;
@@ -49,11 +51,13 @@ export function ApplyChecklist({
   reportNum: number | null;
   status: string;
   pdfReady: boolean;
+  /** Document status (CV + cover letter + latest quality check). When known it replaces the tracker's PDF tick. */
+  docState?: DocInfo | null;
 }) {
   return (
     <PageFrame className="max-w-3xl">
       <Link href={backHref} className="inline-flex items-center gap-1.5 text-sm text-muted transition-colors hover:text-brand">
-        <ArrowLeft className="size-4" /> Pipeline
+        <ArrowLeft className="size-4" /> All Job Opportunities
       </Link>
       <header className="mt-5">
         <p className="font-mono text-xs uppercase tracking-[0.18em] text-faint">Apply checklist</p>
@@ -143,7 +147,7 @@ export function ApplyChecklist({
         <div className="flex flex-wrap items-start gap-2">
           <AppliedButton trackerNum={trackerNum} status={status} />
           <SeedButton trackerNum={trackerNum} />
-          <MarkPdfReadyButton reportNum={reportNum} ready={pdfReady} />
+          {docState ? <StatePill info={docState} className="px-2.5 py-1 text-xs" /> : <MarkPdfReadyButton reportNum={reportNum} ready={pdfReady} />}
         </div>
         {!trackerNum && <p className="mt-2 text-xs text-faint">Applied and seed follow-up need a tracker row.</p>}
       </Section>
